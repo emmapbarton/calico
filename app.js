@@ -647,14 +647,14 @@ function syncColourPicker() {
   });
 }
 
-document.getElementById('colour-row').addEventListener('click', e => {
+document.addEventListener('click', function(e) {
   const dot = e.target.closest('.col-dot');
-  if (!dot) return;
-  pickedColor = dot.dataset.c;
-  syncColourPicker();
+  if (dot && dot.closest('#colour-row')) {
+    pickedColor = dot.dataset.c;
+    syncColourPicker();
+  }
+  if (e.target.id === 'modal-bg') closeModal();
 });
-
-document.getElementById('modal-bg').addEventListener('click', closeModal);
 
 /* ══════════════════════════════════════════
    NAVIGATION

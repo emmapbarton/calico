@@ -689,16 +689,15 @@ const INT_DESCS = {
 };
 function intensityDesc(v) { return INT_DESCS[v] || ''; }
 
-const obSlider = document.getElementById('ob-slider');
-obSlider.addEventListener('input', function() {
-  document.getElementById('ob-num').textContent  = this.value;
-  document.getElementById('ob-desc').textContent = intensityDesc(+this.value);
-});
-
-const sbsSlider = document.getElementById('settings-baseline-slider');
-sbsSlider.addEventListener('input', function() {
-  document.getElementById('settings-baseline-num').textContent  = this.value;
-  document.getElementById('settings-baseline-desc').textContent = intensityDesc(+this.value);
+document.addEventListener('input', function(e) {
+  if (e.target.id === 'ob-slider') {
+    document.getElementById('ob-num').textContent  = e.target.value;
+    document.getElementById('ob-desc').textContent = intensityDesc(+e.target.value);
+  }
+  if (e.target.id === 'settings-baseline-slider') {
+    document.getElementById('settings-baseline-num').textContent  = e.target.value;
+    document.getElementById('settings-baseline-desc').textContent = intensityDesc(+e.target.value);
+  }
 });
 
 function obNext(step) {

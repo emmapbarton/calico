@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FlowCal — intensity-aware scheduling</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ONBOARDING OVERLAY -->
+<div id="onboarding" class="onboarding-overlay">
+  <div class="onboarding-card">
+    <div class="ob-step" id="ob-step-1">
+      <div class="ob-eyebrow">Welcome to</div>
+      <h1 class="ob-title">FlowCal</h1>
+      <p class="ob-sub">Scheduling that adapts to how you actually feel each day.</p>
+      <button class="ob-btn" onclick="obNext(1)">Get started</button>
+    </div>
+
+    <div class="ob-step hidden" id="ob-step-2">
+      <div class="ob-eyebrow">Step 1 of 2</div>
+      <h2 class="ob-title-sm">How hard do you typically work on a normal day?</h2>
+      <p class="ob-sub">This is your baseline intensity — it tells FlowCal how many hours to schedule by default. No judgment, just calibration.</p>
+      <div class="ob-intensity-wrap">
+        <div class="ob-intensity-labels"><span>Easy</span><span>Moderate</span><span>Intense</span></div>
+        <input type="range" id="ob-intensity" min="1" max="10" value="7" class="ob-slider">
+        <div class="ob-intensity-display"><span id="ob-int-val">7</span><span class="ob-int-sub">/10</span></div>
+      </div>
+      <div class="ob-int-desc" id="ob-int-desc">Around 6–7 focused hours a day, with regular breaks.</div>
+      <button class="ob-btn" onclick="obNext(2)">Next</button>
+    </div>
+
+    <div class="ob-step hidden" id="ob-step-3">
+      <div class="ob-eyebrow">Step 2 of 2</div>
+      <h2 class="ob-title-sm">How should hours be spread across days by default?</h2>
+      <p class="ob-sub">You can always adjust this per task.</p>
+      <div class="ob-distribution-opts">
+        <label class="ob-dist-opt">
+          <input type="radio" name="dist" value="even" checked>
+          <div class="ob-dist-card">
+            <div class="ob-dist-icon">⟷</div>
+            <div class="ob-dist-label">Even spread</div>
+            <div class="ob-dist-desc">Same hours each available day</div>
+          </div>
+        </label>
+        <label class="ob-dist-opt">
+          <input type="radio" name="dist" value="front">
+          <div class="ob-dist-card">
+            <div class="ob-dist-icon">▶◀</div>
+            <div class="ob-dist-label">Front-loaded</div>
+            <div class="ob-dist-desc">More work earlier, ease off near deadline</div>
+          </div>
+        </label>
+        <label class="ob-dist-opt">
+          <input type="radio" name="dist" value="back">
+          <div class="ob-dist-card">
+            <div class="ob-dist-icon">◀▶</div>
+            <div class="ob-dist-label">Back-loaded</div>
+            <div class="ob-dist-desc">Ramp up toward the deadline</div>
+          </div>
+        </label>
+        <label class="ob-dist-opt">
+          <input type="radio" name="dist" value="weighted">
+          <div class="ob-dist-card">
+            <div class="ob-dist-icon">≋</div>
+            <div class="ob-dist-label">By free time</div>
+            <div class="ob-dist-desc">More hours on days with fewer events</div>
+          </div>
+        </label>
+      </div>
+      <button class="ob-btn" onclick="obFinish()">Start scheduling</button>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="app" class="app hidden">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <span class="brand-name">Flow<em>Cal</em></span>
+    </div>
+
+    <nav class="sidebar-nav">
+      <button class="nav-item active" onclick="setView('week')" id="nav-week">
+        <span class="nav-icon">⊞</span> Week
+      </button>
+      <button class="nav-item" onclick="setView('agenda')" id="nav-agenda">
+        <span class="nav-icon">≡</span> Agenda
+      </button>
+    </nav>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Baseline</div>
+      <div class="baseline-display">
+        <span id="baseline-val">7</span><span class="baseline-sub">/10</span>
+      </div>
+      <button class="text-btn" onclick="showReassess()">Reassess →</button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Tasks</div>
+      <div id="task-list-sidebar" class="task-list-sidebar"></div>
+      <button class="add-item-btn" onclick="openAddModal('task')">+ Add task</button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">Events</div>
+      <div id="event-list-sidebar" class="task-list-sidebar"></div>
+      <button class="add-item-btn" onclick="openAddModal('event')">+ Add event</button>
+    </div>
+  </aside>
+
+  <!-- MAIN CONTENT -->
+  <main class="main-content">
+    <div class="topbar">
+      <div class="topbar-nav">
+        <button class="icon-btn" onclick="shiftWeek(-1)">←</button>
+        <span class="week-range" id="week-range-label"></span>
+        <button class="icon-btn" onclick="shiftWeek(1)">→</button>
+        <button class="today-btn" onclick="goToday()">Today</button>
+      </div>
+      <div class="topbar-right">
+        <div class="view-toggle">
+          <button id="toggle-week" class="toggle-btn active" onclick="setView('week')">Week</button>
+          <button id="toggle-agenda" class="toggle-btn" onclick="setView('agenda')">Agenda</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- WEEK VIEW -->
+    <div id="view-week" class="view-panel">
+      <div class="week-header" id="week-header"></div>
+      <div class="week-intensity-row" id="week-intensity-row"></div>
+      <div class="week-body" id="week-body"></div>
+    </div>
+
+    <!-- AGENDA VIEW -->
+    <div id="view-agenda" class="view-panel hidden">
+      <div id="agenda-body"></div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ADD/EDIT MODAL -->
+<div id="modal-overlay" class="modal-overlay hidden" onclick="closeModal(event)">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 id="modal-title">Add task</h3>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field-group">
+        <label>Name</label>
+        <input type="text" id="field-name" placeholder="e.g. Write project report">
+      </div>
+      <div class="field-group field-row">
+        <div>
+          <label>Type</label>
+          <select id="field-type" onchange="onTypeChange()">
+            <option value="task">Task (deadline)</option>
+            <option value="event">Event (blocked time)</option>
+          </select>
+        </div>
+        <div>
+          <label>Priority</label>
+          <select id="field-priority">
+            <option value="mandatory">Mandatory</option>
+            <option value="optional">Optional</option>
+          </select>
+        </div>
+      </div>
+      <div id="task-fields">
+        <div class="field-group field-row">
+          <div>
+            <label>Deadline</label>
+            <input type="date" id="field-deadline">
+          </div>
+          <div>
+            <label>Total hours</label>
+            <input type="number" id="field-hours" min="0.5" step="0.5" value="4">
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Distribution</label>
+          <select id="field-distribution">
+            <option value="inherit">Use my default</option>
+            <option value="even">Even spread</option>
+            <option value="front">Front-loaded</option>
+            <option value="back">Back-loaded</option>
+            <option value="weighted">By free time</option>
+          </select>
+        </div>
+      </div>
+      <div id="event-fields" class="hidden">
+        <div class="field-group field-row">
+          <div>
+            <label>Date</label>
+            <input type="date" id="field-event-date">
+          </div>
+          <div>
+            <label>Start time</label>
+            <input type="time" id="field-start" value="09:00">
+          </div>
+          <div>
+            <label>End time</label>
+            <input type="time" id="field-end" value="10:00">
+          </div>
+        </div>
+      </div>
+      <div class="field-group">
+        <label>Color</label>
+        <div class="color-picker" id="color-picker">
+          <span class="color-dot selected" data-color="#7c6fcd" style="background:#7c6fcd"></span>
+          <span class="color-dot" data-color="#3d8bcd" style="background:#3d8bcd"></span>
+          <span class="color-dot" data-color="#2ca87f" style="background:#2ca87f"></span>
+          <span class="color-dot" data-color="#d4537e" style="background:#d4537e"></span>
+          <span class="color-dot" data-color="#e09c3a" style="background:#e09c3a"></span>
+          <span class="color-dot" data-color="#888" style="background:#888"></span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" id="modal-delete-btn" onclick="deleteCurrentItem()" style="display:none;color:#c0392b;border-color:#c0392b">Delete</button>
+      <button class="btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveItem()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- REASSESS MODAL -->
+<div id="reassess-overlay" class="modal-overlay hidden" onclick="closeReassess(event)">
+  <div class="modal-card" onclick="event.stopPropagation()" style="max-width:400px">
+    <div class="modal-header">
+      <h3>Reassess baseline intensity</h3>
+      <button class="modal-close" onclick="closeReassess()">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="color:var(--text-2);font-size:14px;margin-bottom:1.5rem">Your recent intensity levels suggest your baseline might need adjusting. Update it so FlowCal distributes hours more accurately.</p>
+      <div class="ob-intensity-wrap">
+        <div class="ob-intensity-labels"><span>Easy</span><span>Moderate</span><span>Intense</span></div>
+        <input type="range" id="reassess-slider" min="1" max="10" value="7" class="ob-slider">
+        <div class="ob-intensity-display"><span id="reassess-val">7</span><span class="ob-int-sub">/10</span></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeReassess()">Cancel</button>
+      <button class="btn-primary" onclick="saveReassess()">Update baseline</button>
+    </div>
+  </div>
+</div>
+
+<!-- REASSESS NUDGE -->
+<div id="nudge-banner" class="nudge-banner hidden">
+  <span>📊 You've been adjusting intensity in one direction for 3 days. Want to reassess your baseline?</span>
+  <button onclick="showReassess()">Reassess</button>
+  <button onclick="dismissNudge()" class="nudge-dismiss">✕</button>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

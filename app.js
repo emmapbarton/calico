@@ -261,7 +261,7 @@ function renderWeek() {
     const val = getInt(dStr);
     const cell = document.createElement('div');
     cell.className = 'wk-int-cell';
-    cell.innerHTML = `<input type="range" min="1" max="10" value="${val}" data-d="${dStr}">
+    cell.innerHTML = `<input type="range" class="slider-sm" min="1" max="10" value="${val}" data-d="${dStr}">
       <div class="wk-int-val" id="wiv-${dStr}">${val}</div>`;
     intRow.appendChild(cell);
   });
@@ -379,7 +379,7 @@ function renderAgenda() {
         <div class="ag-int-col">
           <div class="ag-int-lbl">Intensity</div>
           <div class="ag-int-row">
-            <input type="range" class="ag-int-slider" min="1" max="10" value="${val}" data-d="${dStr}">
+            <input type="range" class="ag-int-slider slider-sm" min="1" max="10" value="${val}" data-d="${dStr}">
             <div class="ag-int-val" id="aiv-${dStr}">${val}</div>
           </div>
         </div>

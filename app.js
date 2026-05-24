@@ -133,26 +133,215 @@ function allocate(task) {
   return out;
 }
 
+/* ── Repeating task occurrence engine ──
+   For a repeating task, each occurrence is treated as an independent
+   mini-task: deadline = occurrence date, window starts the day after
+   the previous occurrence (or today, whichever is later).
+   We generate virtual occurrence objects so the allocator can treat
+   each one like a normal task. */
+
+function taskOccurrencesBetween(task, fromDate, toDate) {
+  // Returns array of {deadline: dateStr, windowStart: dateStr}
+  // for all occurrences of this task in [fromDate, toDate]
+  if (!task.repeat || task.repeat === 'none') {
+    // Non-repeating: single occurrence at task.deadline
+    if (!task.deadline) return [];
+    const d = parseDate(task.deadline);
+    if (d >= fromDate && d <= toDate) {
+      return [{ deadline: task.deadline, windowStart: ds(fromDate) }];
+    }
+    return [];
+  }
+
+  const occurrences = [];
+  const start = parseDate(task.date || task.deadline); // repeat start date
+  let prevOccDate = null;
+  let count = 0;
+  let cur = new Date(start);
+
+  // Walk forward from the task start date, collecting occurrences up to toDate
+  while (cur <= toDate) {
+    const dStr = ds(cur);
+    if (taskRepeatOccursOn(task, dStr)) {
+      // Check count/date end
+      if (task.repeatEndType === 'date' && task.repeatEndDate) {
+        if (cur > parseDate(task.repeatEndDate)) break;
+      }
+      if (task.repeatEndType === 'count' && task.repeatCount) {
+        if (count >= task.repeatCount) break;
+      }
+      count++;
+      if (cur >= fromDate) {
+        // window starts day after prev occurrence, or fromDate, whichever later
+        const winStart = prevOccDate
+          ? ds(addDays(parseDate(prevOccDate), 1) > fromDate
+              ? addDays(parseDate(prevOccDate), 1)
+              : fromDate)
+          : ds(fromDate);
+        occurrences.push({ deadline: dStr, windowStart: winStart });
+      }
+      prevOccDate = dStr;
+    }
+    cur = addDays(cur, 1);
+  }
+  return occurrences;
+}
+
+function taskRepeatOccursOn(task, dateStr) {
+  // Same logic as eventOccursOn but for tasks
+  const start  = parseDate(task.date || task.deadline);
+  const target = parseDate(dateStr);
+  if (target < start) return false;
+  const dow = target.getDay();
+  if (task.repeat === 'daily')    return true;
+  if (task.repeat === 'weekly')   return dow === start.getDay();
+  if (task.repeat === 'weekdays') return dow >= 1 && dow <= 5;
+  if (task.repeat === 'weekends') return dow === 0 || dow === 6;
+  if (task.repeat === 'custom')   return (task.repeatDays || []).includes(dow);
+  if (task.repeat === 'interval') {
+    const interval = task.repeatInterval || 7;
+    const diff = Math.round((target - start) / 86400000);
+    return diff >= 0 && diff % interval === 0;
+  }
+  return false;
+}
+
+function allocateOccurrence(task, windowStart, deadlineStr) {
+  // Allocate task.hours across days in [windowStart .. deadline]
+  // using intensity-weighted distribution, same as the base allocator
+  const out = {};
+  const start    = parseDate(windowStart);
+  const deadline = parseDate(deadlineStr);
+  const t        = today();
+  const from     = start > t ? start : t; // never allocate to the past
+
+  const days = [];
+  let cur = new Date(from);
+  while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur, 1); }
+  if (!days.length) return out;
+
+  const hours    = task.hours || 1;
+  const dist     = effectiveDist(task);
+  let weights    = days.map((d, i) => {
+    if (dist === 'even')     return 1;
+    if (dist === 'front')    return days.length - i;
+    if (dist === 'back')     return i + 1;
+    if (dist === 'weighted') return getInt(d);
+    return 1;
+  });
+  weights = weights.map((w, i) => w * (getInt(days[i]) / S.baseline));
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (!total) return out;
+  days.forEach((d, i) => {
+    out[d] = Math.round((weights[i] / total) * hours * 10) / 10;
+  });
+  return out;
+}
+
+// Cache of allocations per task per visible week to avoid recomputation
+let _allocCache = {};
+function clearAllocCache() { _allocCache = {}; }
+
+function getAllocations(task, visibleDays) {
+  // Returns {dateStr: hours} for all visible days, summed across occurrences
+  const cacheKey = task.id + '|' + visibleDays[0] + '|' + visibleDays[visibleDays.length-1];
+  if (_allocCache[cacheKey]) return _allocCache[cacheKey];
+
+  const from = parseDate(visibleDays[0]);
+  const to   = parseDate(visibleDays[visibleDays.length - 1]);
+  const out  = {};
+
+  if (!task.repeat || task.repeat === 'none') {
+    // Non-repeating: standard allocate
+    const alloc = allocate(task);
+    visibleDays.forEach(d => { if (alloc[d]) out[d] = alloc[d]; });
+  } else {
+    // Repeating: find occurrences in a wider window (prev occurrence may be before visible range)
+    const lookback = addDays(from, -365); // look back up to a year to find windowStart
+    const occs = taskOccurrencesBetween(task, lookback, to);
+    occs.forEach(occ => {
+      const alloc = allocateOccurrence(task, occ.windowStart, occ.deadline);
+      visibleDays.forEach(d => {
+        if (alloc[d]) out[d] = (out[d] || 0) + alloc[d];
+      });
+    });
+  }
+
+  _allocCache[cacheKey] = out;
+  return out;
+}
+
+// Visible days for current week view (used as allocation context)
+let _visibleDays = [];
+function setVisibleDays(days) { _visibleDays = days; clearAllocCache(); }
+
 function taskHoursOnDay(task, dateStr) {
-  return allocate(task)[dateStr] ?? 0;
+  if (!_visibleDays.length) return allocate(task)[dateStr] ?? 0;
+  return getAllocations(task, _visibleDays)[dateStr] ?? 0;
 }
 
 function totalLoadOnDay(dateStr) {
   return Math.round(
-    S.tasks.reduce((a,t) => a + taskHoursOnDay(t, dateStr), 0) * 10
+    S.tasks.reduce((a, t) => a + taskHoursOnDay(t, dateStr), 0) * 10
   ) / 10;
 }
 
 function tasksOnDay(dateStr) {
-  return S.tasks.filter(t => {
-    if (!t.deadline) return false;
-    const d = parseDate(dateStr);
-    return d >= today() && d <= parseDate(t.deadline) && taskHoursOnDay(t, dateStr) > 0;
-  });
+  return S.tasks.filter(t => taskHoursOnDay(t, dateStr) > 0);
+}
+
+function eventOccursOn(ev, dateStr) {
+  if (!ev.repeat || ev.repeat === 'none') {
+    return ev.date === dateStr;
+  }
+  const start  = parseDate(ev.date);
+  const target = parseDate(dateStr);
+  if (target < start) return false;
+
+  // Check repeat end
+  if (ev.repeatEndType === 'date' && ev.repeatEndDate) {
+    if (target > parseDate(ev.repeatEndDate)) return false;
+  }
+
+  const dow = target.getDay(); // 0=Sun, 1=Mon … 6=Sat
+
+  if (ev.repeat === 'daily')    return true;
+  if (ev.repeat === 'weekly')   return dow === start.getDay();
+  if (ev.repeat === 'weekdays') return dow >= 1 && dow <= 5;
+  if (ev.repeat === 'weekends') return dow === 0 || dow === 6;
+  if (ev.repeat === 'custom')   return (ev.repeatDays || []).includes(dow);
+  if (ev.repeat === 'interval') {
+    const interval = ev.repeatInterval || 7;
+    const diff = Math.round((target - start) / 86400000);
+    return diff >= 0 && diff % interval === 0;
+  }
+  return false;
+}
+
+function countOccurrencesBefore(ev, dateStr) {
+  // Count how many times ev occurs from ev.date up to (not including) dateStr
+  if (!ev.repeat || ev.repeat === 'none') return 0;
+  const start  = parseDate(ev.date);
+  const target = parseDate(dateStr);
+  let count = 0;
+  let cur = new Date(start);
+  while (cur < target) {
+    if (eventOccursOn(ev, ds(cur))) count++;
+    cur = addDays(cur, 1);
+  }
+  return count;
 }
 
 function eventsOnDay(dateStr) {
-  return S.events.filter(e => e.date === dateStr);
+  return S.events.filter(ev => {
+    if (!eventOccursOn(ev, dateStr)) return false;
+    // Check count-based end
+    if (ev.repeatEndType === 'count' && ev.repeatCount) {
+      const n = countOccurrencesBefore(ev, dateStr);
+      if (n >= ev.repeatCount) return false;
+    }
+    return true;
+  });
 }
 
 /* ══════════════════════════════════════════
@@ -213,11 +402,12 @@ function renderSidebar() {
   sbTasks.innerHTML = '';
   S.tasks.forEach(t => {
     const rem = Math.max(0, t.hours - (t.logged ?? 0));
-    const el = document.createElement('div');
+    const rl  = t.repeat && t.repeat !== 'none' ? repeatLabel(t) : '';
+    const el  = document.createElement('div');
     el.className = 'sb-pill';
     el.innerHTML = `<span class="sb-dot" style="background:${t.color}"></span>
       <span class="sb-name">${t.name}</span>
-      <span class="sb-hrs">${rem}h</span>`;
+      <span class="sb-hrs">${rl ? rl : rem + 'h'}</span>`;
     el.onclick = () => openModal('task', t.id);
     sbTasks.appendChild(el);
   });
@@ -239,6 +429,7 @@ function renderSidebar() {
 function renderWeek() {
   const ws = weekStartDate(S.weekOffset);
   const days = Array.from({length:7}, (_,i) => addDays(ws,i));
+  setVisibleDays(days.map(d => ds(d)));
   const todayStr = ds(today());
 
   // Headers
@@ -357,6 +548,7 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
 function renderAgenda() {
   const ws = weekStartDate(S.weekOffset);
   const days = Array.from({length:7}, (_,i) => addDays(ws,i));
+  setVisibleDays(days.map(d => ds(d)));
   const todayStr = ds(today());
   const body = document.getElementById('agenda-body');
   body.innerHTML = '';
@@ -413,6 +605,15 @@ function renderAgenda() {
   });
 }
 
+function repeatLabel(ev) {
+  if (!ev.repeat || ev.repeat === 'none') return '';
+  const map = {
+    daily: 'Daily', weekly: 'Weekly', weekdays: 'Weekdays',
+    weekends: 'Weekends', custom: 'Custom', interval: `Every ${ev.repeatInterval||7}d`
+  };
+  return map[ev.repeat] || '';
+}
+
 function makeAgendaEntry(item, type, dStr) {
   const el = document.createElement('div');
   el.className = `ag-entry${item.priority==='optional'?' optional':''}`;
@@ -428,14 +629,17 @@ function makeAgendaEntry(item, type, dStr) {
     const avg = item.hours / Math.max(1, daysRemaining(item));
     if (hrs < avg * 0.85) redistBadge = `<span class="badge badge-reduced">↓ reduced</span>`;
     else if (hrs > avg * 1.15) redistBadge = `<span class="badge badge-extra">↑ extra</span>`;
+    const taskRl = repeatLabel(item);
     metaHtml = `${hrs}h ${redistBadge}
+      ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
       <div class="hrs-editor">
-        <button class="he-minus" title="Reduce total hours">−</button>
-        <span class="hrs-num">${item.hours}h total</span>
-        <button class="he-plus" title="Increase total hours">+</button>
+        <button class="he-minus" title="Reduce hours per occurrence">−</button>
+        <span class="hrs-num">${item.hours}h</span>
+        <button class="he-plus" title="Increase hours per occurrence">+</button>
       </div>`;
   } else {
-    metaHtml = `${item.start}–${item.end}`;
+    const rl = repeatLabel(item);
+    metaHtml = `${item.start}–${item.end}${rl ? ` <span class="repeat-badge">${rl}</span>` : ''}`;
   }
 
   const typeBadge  = type==='task'
@@ -530,6 +734,42 @@ function resetData() {
 /* ══════════════════════════════════════════
    MODAL
 ══════════════════════════════════════════ */
+function onTaskRepeatChange() {
+  const val = document.getElementById('f-task-repeat').value;
+  const isRepeat = val !== 'none';
+  document.getElementById('task-repeat-custom').classList.toggle('hidden', val !== 'custom');
+  document.getElementById('task-repeat-interval').classList.toggle('hidden', val !== 'interval');
+  document.getElementById('task-repeat-end-wrap').classList.toggle('hidden', !isRepeat);
+  document.getElementById('task-start-date-row').classList.toggle('hidden', !isRepeat);
+  // When repeating, deadline becomes "occurs every X" and start date is the anchor
+  document.getElementById('task-deadline-label').textContent = isRepeat ? 'First occurrence' : 'Deadline';
+}
+
+function onTaskRepeatEndChange() {
+  const val = document.getElementById('f-task-repeat-end-type').value;
+  document.getElementById('task-repeat-end-date-wrap').classList.toggle('hidden', val !== 'date');
+  document.getElementById('task-repeat-end-count-wrap').classList.toggle('hidden', val !== 'count');
+}
+
+function onRepeatChange() {
+  const val = document.getElementById('f-repeat').value;
+  document.getElementById('repeat-custom').classList.toggle('hidden', val !== 'custom');
+  document.getElementById('repeat-interval').classList.toggle('hidden', val !== 'interval');
+  document.getElementById('repeat-end-wrap').classList.toggle('hidden', val === 'none');
+}
+
+function onRepeatEndChange() {
+  const val = document.getElementById('f-repeat-end-type').value;
+  document.getElementById('repeat-end-date-wrap').classList.toggle('hidden', val !== 'date');
+  document.getElementById('repeat-end-count-wrap').classList.toggle('hidden', val !== 'count');
+}
+
+function onTypeChange() {
+  const type = document.getElementById('f-type').value;
+  document.getElementById('task-fields').classList.toggle('hidden', type !== 'task');
+  document.getElementById('event-fields').classList.toggle('hidden', type !== 'event');
+}
+
 function openModal(type, id) {
   editingId   = id ?? null;
   editingType = type;
@@ -554,34 +794,69 @@ function openModal(type, id) {
       document.getElementById('f-priority').value = item.priority || 'mandatory';
       onTypeChange();
       if ((item.type||type) === 'task') {
-        document.getElementById('f-deadline').value = item.deadline || todayVal;
-        document.getElementById('f-hours').value    = item.hours || 4;
-        document.getElementById('f-dist').value     = item.dist  || 'inherit';
+        document.getElementById('f-deadline').value     = item.deadline || todayVal;
+        document.getElementById('f-task-start-date').value = item.date || item.deadline || todayVal;
+        document.getElementById('f-hours').value        = item.hours || 4;
+        document.getElementById('f-dist').value         = item.dist  || 'inherit';
+        document.getElementById('f-task-repeat').value  = item.repeat || 'none';
+        onTaskRepeatChange();
+        if (item.repeat && item.repeat !== 'none') {
+          document.getElementById('f-task-start-date').value = item.date || todayVal;
+          document.getElementById('f-task-repeat-end-type').value = item.repeatEndType || 'date';
+          onTaskRepeatEndChange();
+          document.getElementById('f-task-repeat-end-date').value = item.repeatEndDate || '';
+          document.getElementById('f-task-repeat-count').value    = item.repeatCount || 10;
+          if (item.repeat === 'custom') {
+            document.querySelectorAll('input[name="trday"]').forEach(cb => {
+              cb.checked = (item.repeatDays || []).includes(+cb.value);
+            });
+          }
+          if (item.repeat === 'interval') {
+            document.getElementById('f-task-interval').value = item.repeatInterval || 7;
+          }
+        }
       } else {
-        document.getElementById('f-date').value  = item.date  || todayVal;
-        document.getElementById('f-start').value = item.start || '09:00';
-        document.getElementById('f-end').value   = item.end   || '10:00';
+        document.getElementById('f-date').value    = item.date  || todayVal;
+        document.getElementById('f-start').value  = item.start || '09:00';
+        document.getElementById('f-end').value    = item.end   || '10:00';
+        document.getElementById('f-repeat').value = item.repeat || 'none';
+        onRepeatChange();
+        if (item.repeat === 'custom') {
+          document.querySelectorAll('input[name="rday"]').forEach(cb => {
+            cb.checked = (item.repeatDays || []).includes(+cb.value);
+          });
+        }
+        if (item.repeat === 'interval') {
+          document.getElementById('f-interval').value = item.repeatInterval || 7;
+        }
+        if (item.repeat && item.repeat !== 'none') {
+          document.getElementById('f-repeat-end-type').value = item.repeatEndType || 'date';
+          onRepeatEndChange();
+          document.getElementById('f-repeat-end-date').value  = item.repeatEndDate  || '';
+          document.getElementById('f-repeat-count').value     = item.repeatCount    || 10;
+        }
       }
       pickedColor = item.color || '#111111';
     }
   } else {
-    document.getElementById('f-name').value     = '';
-    document.getElementById('f-priority').value = 'mandatory';
-    document.getElementById('f-hours').value    = 4;
-    document.getElementById('f-dist').value     = 'inherit';
-    document.getElementById('f-start').value    = '09:00';
-    document.getElementById('f-end').value      = '10:00';
+    document.getElementById('f-name').value          = '';
+    document.getElementById('f-priority').value       = 'mandatory';
+    document.getElementById('f-hours').value          = 4;
+    document.getElementById('f-dist').value           = 'inherit';
+    document.getElementById('f-start').value          = '09:00';
+    document.getElementById('f-end').value            = '10:00';
+    document.getElementById('f-repeat').value         = 'none';
+    document.getElementById('f-task-repeat').value    = 'none';
+    document.getElementById('f-task-start-date').value = ds(today());
+    onRepeatChange();
+    onTaskRepeatChange();
+    document.querySelectorAll('input[name="rday"]').forEach(cb => { cb.checked = false; });
+    document.querySelectorAll('input[name="trday"]').forEach(cb => { cb.checked = false; });
   }
 
   syncColourPicker();
   document.getElementById('modal-bg').classList.remove('hidden');
   document.getElementById('f-name').focus();
-}
-
-function onTypeChange() {
-  const type = document.getElementById('f-type').value;
-  document.getElementById('task-fields').classList.toggle('hidden', type!=='task');
-  document.getElementById('event-fields').classList.toggle('hidden', type!=='event');
 }
 
 function closeModal() {
@@ -597,14 +872,35 @@ function saveItem() {
   const color    = pickedColor;
 
   if (type === 'task') {
+    const repeatVal = document.getElementById('f-task-repeat').value;
     const obj = {
       id: editingId || uid(),
       type: 'task', name, priority, color,
       deadline: document.getElementById('f-deadline').value,
+      date:     document.getElementById('f-deadline').value, // repeat start = deadline for non-repeating
       hours:    parseFloat(document.getElementById('f-hours').value) || 4,
       dist:     document.getElementById('f-dist').value,
       logged:   0,
+      repeat:   repeatVal,
     };
+    if (repeatVal !== 'none') {
+      // For repeating tasks, f-task-start-date is the repeat start
+      obj.date = document.getElementById('f-task-start-date').value || obj.deadline;
+      const endType = document.getElementById('f-task-repeat-end-type').value;
+      obj.repeatEndType = endType;
+      if (endType === 'date') {
+        obj.repeatEndDate = document.getElementById('f-task-repeat-end-date').value;
+      } else {
+        obj.repeatCount = parseInt(document.getElementById('f-task-repeat-count').value) || 10;
+      }
+      if (repeatVal === 'custom') {
+        obj.repeatDays = Array.from(document.querySelectorAll('input[name="trday"]:checked'))
+          .map(cb => +cb.value);
+      }
+      if (repeatVal === 'interval') {
+        obj.repeatInterval = parseInt(document.getElementById('f-task-interval').value) || 7;
+      }
+    }
     if (editingId) {
       const i = S.tasks.findIndex(x=>x.id===editingId);
       if (i>=0) { obj.logged = S.tasks[i].logged ?? 0; S.tasks[i] = obj; }
@@ -612,13 +908,31 @@ function saveItem() {
       S.tasks.push(obj);
     }
   } else {
+    const repeatVal = document.getElementById('f-repeat').value;
     const obj = {
       id: editingId || uid(),
       type: 'event', name, priority, color,
       date:  document.getElementById('f-date').value,
       start: document.getElementById('f-start').value,
       end:   document.getElementById('f-end').value,
+      repeat: repeatVal,
     };
+    if (repeatVal !== 'none') {
+      const endType = document.getElementById('f-repeat-end-type').value;
+      obj.repeatEndType = endType;
+      if (endType === 'date') {
+        obj.repeatEndDate = document.getElementById('f-repeat-end-date').value;
+      } else {
+        obj.repeatCount = parseInt(document.getElementById('f-repeat-count').value) || 10;
+      }
+      if (repeatVal === 'custom') {
+        obj.repeatDays = Array.from(document.querySelectorAll('input[name="rday"]:checked'))
+          .map(cb => +cb.value);
+      }
+      if (repeatVal === 'interval') {
+        obj.repeatInterval = parseInt(document.getElementById('f-interval').value) || 7;
+      }
+    }
     if (editingId) {
       const i = S.events.findIndex(x=>x.id===editingId);
       if (i>=0) S.events[i] = obj;

@@ -6,7 +6,7 @@
 <title>Calico</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;1,400&family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@600;700&family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,31 +15,33 @@
 <div id="onboarding" class="ob-overlay hidden">
   <div class="ob-card">
     <div class="ob-step" id="ob-1">
-      <div class="ob-logo">Calico</div>
-      <p class="ob-tagline">Scheduling that bends<br><em>to how you feel.</em></p>
+      <div class="ob-logo">CALICO</div>
+      <p class="ob-tagline">Scheduling that bends<br>to how you feel.</p>
       <button class="btn-primary" onclick="obNext(1)">Get started →</button>
     </div>
     <div class="ob-step hidden" id="ob-2">
-      <div class="ob-step-label">01 / 02</div>
-      <h2 class="ob-heading">What's your typical working intensity?</h2>
+      <div class="ob-step-num">01 / 02</div>
+      <h2 class="ob-heading">WORKING INTENSITY</h2>
       <p class="ob-body">On a normal day, how hard do you push? This sets your baseline so Calico knows how many hours to schedule by default.</p>
-      <div class="int-control">
-        <input type="range" id="ob-slider" class="cal-slider" min="1" max="10" value="7">
-        <div class="int-readout"><span id="ob-num">7</span><span class="int-denom">/10</span></div>
+      <div class="int-widget">
+        <div class="int-big" id="ob-num">7</div>
+        <div class="int-track-wrap">
+          <input type="range" id="ob-slider" class="cal-slider" min="1" max="10" value="7">
+          <div class="int-scale"><span>Low</span><span>Medium</span><span>High</span></div>
+        </div>
       </div>
       <p class="int-desc" id="ob-desc">Around 6–7 focused hours a day, with regular breaks.</p>
-      <div class="int-labels"><span>Easy</span><span>Moderate</span><span>Intense</span></div>
       <button class="btn-primary" onclick="obNext(2)">Next →</button>
     </div>
     <div class="ob-step hidden" id="ob-3">
-      <div class="ob-step-label">02 / 02</div>
-      <h2 class="ob-heading">How should hours be spread across days?</h2>
-      <p class="ob-body">You can override this per task — this is just your starting default.</p>
+      <div class="ob-step-num">02 / 02</div>
+      <h2 class="ob-heading">DEFAULT DISTRIBUTION</h2>
+      <p class="ob-body">How should task hours be spread across days by default? You can override per task.</p>
       <div class="dist-grid">
         <label class="dist-opt"><input type="radio" name="dist" value="even" checked><div class="dist-card"><div class="dist-glyph">⟷</div><div class="dist-name">Even</div><div class="dist-sub">Same hours each day</div></div></label>
         <label class="dist-opt"><input type="radio" name="dist" value="front"><div class="dist-card"><div class="dist-glyph">▶◀</div><div class="dist-name">Front-loaded</div><div class="dist-sub">More work up front</div></div></label>
         <label class="dist-opt"><input type="radio" name="dist" value="back"><div class="dist-card"><div class="dist-glyph">◀▶</div><div class="dist-name">Back-loaded</div><div class="dist-sub">Ramp up to deadline</div></div></label>
-        <label class="dist-opt"><input type="radio" name="dist" value="weighted"><div class="dist-card"><div class="dist-glyph">≋</div><div class="dist-name">By free time</div><div class="dist-sub">Fits around events</div></div></label>
+        <label class="dist-opt"><input type="radio" name="dist" value="weighted"><div class="dist-card"><div class="dist-glyph">≋</div><div class="dist-name">By free time</div><div class="dist-sub">More on lighter days</div></div></label>
       </div>
       <button class="btn-primary" onclick="obFinish()">Start →</button>
     </div>
@@ -50,24 +52,27 @@
 <div id="app" class="app hidden">
   <aside class="sidebar">
     <div class="sidebar-top">
-      <div class="wordmark">Calico</div>
+      <div class="wordmark">CALICO</div>
       <nav class="sidebar-nav">
-        <button class="nav-btn active" id="nav-week" onclick="setView('week')"><span class="nav-ico">⊞</span>Week</button>
-        <button class="nav-btn" id="nav-agenda" onclick="setView('agenda')"><span class="nav-ico">≡</span>Agenda</button>
-        <button class="nav-btn" id="nav-settings" onclick="setView('settings')"><span class="nav-ico">⚙</span>Settings</button>
+        <button class="nav-btn active" id="nav-week"     onclick="setView('week')">    <span class="nav-ico">⊞</span> Week</button>
+        <button class="nav-btn"        id="nav-agenda"   onclick="setView('agenda')">  <span class="nav-ico">≡</span> Agenda</button>
+        <button class="nav-btn"        id="nav-settings" onclick="setView('settings')"><span class="nav-ico">⚙</span> Settings</button>
       </nav>
     </div>
     <div class="sidebar-mid">
-      <div class="sb-label">Tasks</div>
+      <div class="sb-section-label">Tasks</div>
       <div id="sb-tasks"></div>
       <button class="ghost-btn" onclick="openModal('task')">+ Add task</button>
-      <div class="sb-label" style="margin-top:1rem">Events</div>
+      <div class="sb-section-label" style="margin-top:1.25rem">Events</div>
       <div id="sb-events"></div>
       <button class="ghost-btn" onclick="openModal('event')">+ Add event</button>
     </div>
     <div class="sidebar-bottom">
-      <div class="sb-label">Baseline intensity</div>
-      <div class="baseline-val"><span id="sb-baseline">7</span><span class="baseline-denom">/10</span></div>
+      <div class="sb-section-label">Baseline intensity</div>
+      <div class="baseline-display">
+        <span class="baseline-num" id="sb-baseline">7</span>
+        <span class="baseline-denom">/10</span>
+      </div>
     </div>
   </aside>
 
@@ -79,17 +84,17 @@
         <button class="icon-btn" onclick="shiftWeek(1)">→</button>
         <button class="pill-btn" onclick="goToday()">Today</button>
       </div>
-      <div class="topbar-right">
+      <div class="topbar-right" id="topbar-right">
         <div class="view-switch">
-          <button id="sw-week" class="sw-btn active" onclick="setView('week')">Week</button>
-          <button id="sw-agenda" class="sw-btn" onclick="setView('agenda')">Agenda</button>
+          <button id="sw-week"   class="sw-btn active" onclick="setView('week')">Week</button>
+          <button id="sw-agenda" class="sw-btn"        onclick="setView('agenda')">Agenda</button>
         </div>
       </div>
     </div>
 
     <div id="view-week" class="view-panel">
       <div class="wk-head" id="wk-head"></div>
-      <div class="wk-int" id="wk-int"></div>
+      <div class="wk-int"  id="wk-int"></div>
       <div class="wk-body" id="wk-body"></div>
     </div>
 
@@ -99,40 +104,42 @@
 
     <div id="view-settings" class="view-panel hidden">
       <div class="settings-body">
-        <div class="settings-section">
-          <h2 class="settings-heading">Baseline intensity</h2>
+        <div class="settings-card">
+          <h2 class="settings-heading">BASELINE INTENSITY</h2>
           <p class="settings-sub">How hard you work on a normal day. Calico uses this to allocate hours by default.</p>
-          <div class="int-control">
-            <input type="range" id="settings-baseline-slider" class="cal-slider" min="1" max="10" value="7">
-            <div class="int-readout"><span id="settings-baseline-num">7</span><span class="int-denom">/10</span></div>
+          <div class="int-widget">
+            <div class="int-big" id="settings-baseline-num">7</div>
+            <div class="int-track-wrap">
+              <input type="range" id="settings-baseline-slider" class="cal-slider" min="1" max="10" value="7">
+              <div class="int-scale"><span>Low</span><span>Medium</span><span>High</span></div>
+            </div>
           </div>
           <p class="int-desc" id="settings-baseline-desc">Around 6–7 focused hours a day, with regular breaks.</p>
-          <div class="int-labels"><span>Easy</span><span>Moderate</span><span>Intense</span></div>
           <button class="btn-primary" onclick="saveBaseline()">Save baseline</button>
         </div>
-        <div class="settings-section">
-          <h2 class="settings-heading">Default distribution</h2>
+        <div class="settings-card">
+          <h2 class="settings-heading">DEFAULT DISTRIBUTION</h2>
           <p class="settings-sub">How task hours are spread across days when you add a new task.</p>
           <div class="dist-grid">
             <label class="dist-opt"><input type="radio" name="settings-dist" value="even"><div class="dist-card"><div class="dist-glyph">⟷</div><div class="dist-name">Even</div><div class="dist-sub">Same hours each day</div></div></label>
             <label class="dist-opt"><input type="radio" name="settings-dist" value="front"><div class="dist-card"><div class="dist-glyph">▶◀</div><div class="dist-name">Front-loaded</div><div class="dist-sub">More work up front</div></div></label>
             <label class="dist-opt"><input type="radio" name="settings-dist" value="back"><div class="dist-card"><div class="dist-glyph">◀▶</div><div class="dist-name">Back-loaded</div><div class="dist-sub">Ramp up to deadline</div></div></label>
-            <label class="dist-opt"><input type="radio" name="settings-dist" value="weighted"><div class="dist-card"><div class="dist-glyph">≋</div><div class="dist-name">By free time</div><div class="dist-sub">Fits around events</div></div></label>
+            <label class="dist-opt"><input type="radio" name="settings-dist" value="weighted"><div class="dist-card"><div class="dist-glyph">≋</div><div class="dist-name">By free time</div><div class="dist-sub">More on lighter days</div></div></label>
           </div>
           <button class="btn-primary" onclick="saveDist()">Save distribution</button>
         </div>
-        <div class="settings-section">
-          <h2 class="settings-heading">Working hours</h2>
+        <div class="settings-card">
+          <h2 class="settings-heading">WORKING HOURS</h2>
           <p class="settings-sub">The window of the day Calico schedules tasks within.</p>
           <div class="field-row">
             <div class="field-group"><label>Day starts</label><input type="time" id="settings-day-start" value="09:00"></div>
-            <div class="field-group"><label>Day ends</label><input type="time" id="settings-day-end" value="18:00"></div>
+            <div class="field-group"><label>Day ends</label>  <input type="time" id="settings-day-end"   value="18:00"></div>
           </div>
           <button class="btn-primary" onclick="saveWorkingHours()">Save hours</button>
         </div>
-        <div class="settings-section danger-section">
-          <h2 class="settings-heading">Reset data</h2>
-          <p class="settings-sub">Clear all tasks, events and intensity history. Your settings will be kept.</p>
+        <div class="settings-card settings-card--danger">
+          <h2 class="settings-heading">RESET DATA</h2>
+          <p class="settings-sub">Clear all tasks, events and intensity history. Settings are kept.</p>
           <button class="btn-danger" onclick="resetData()">Clear all data</button>
         </div>
       </div>
@@ -144,11 +151,14 @@
 <div id="modal-bg" class="modal-bg hidden">
   <div class="modal">
     <div class="modal-head">
-      <span id="modal-title-text">Add task</span>
+      <span class="modal-title" id="modal-title-text">Add task</span>
       <button class="modal-x" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div class="field-group"><label>Name</label><input type="text" id="f-name" placeholder="e.g. Write project report" autocomplete="off"></div>
+      <div class="field-group">
+        <label>Name</label>
+        <input type="text" id="f-name" placeholder="e.g. Write project report" autocomplete="off">
+      </div>
       <div class="field-row">
         <div class="field-group"><label>Type</label><select id="f-type" onchange="onTypeChange()"><option value="task">Task</option><option value="event">Event</option></select></div>
         <div class="field-group"><label>Priority</label><select id="f-priority"><option value="mandatory">Mandatory</option><option value="optional">Optional</option></select></div>
@@ -164,24 +174,25 @@
         <div class="field-row">
           <div class="field-group"><label>Date</label><input type="date" id="f-date"></div>
           <div class="field-group"><label>Start</label><input type="time" id="f-start" value="09:00"></div>
-          <div class="field-group"><label>End</label><input type="time" id="f-end" value="10:00"></div>
+          <div class="field-group"><label>End</label>  <input type="time" id="f-end"   value="10:00"></div>
         </div>
       </div>
-      <div class="field-group"><label>Colour</label>
+      <div class="field-group">
+        <label>Colour</label>
         <div class="colour-row" id="colour-row">
           <span class="col-dot selected" data-c="#111111" style="background:#111111"></span>
           <span class="col-dot" data-c="#e85d26" style="background:#e85d26"></span>
-          <span class="col-dot" data-c="#555555" style="background:#555555"></span>
-          <span class="col-dot" data-c="#2e7d4f" style="background:#2e7d4f"></span>
-          <span class="col-dot" data-c="#1a5276" style="background:#1a5276"></span>
-          <span class="col-dot" data-c="#7d3c98" style="background:#7d3c98"></span>
-          <span class="col-dot" data-c="#b7410e" style="background:#b7410e"></span>
+          <span class="col-dot" data-c="#3f3f3f" style="background:#3f3f3f"></span>
+          <span class="col-dot" data-c="#9b9b9b" style="background:#9b9b9b"></span>
+          <span class="col-dot" data-c="#2e6b4f" style="background:#2e6b4f"></span>
+          <span class="col-dot" data-c="#4a3a7a" style="background:#4a3a7a"></span>
+          <span class="col-dot" data-c="#8b3a2a" style="background:#8b3a2a"></span>
         </div>
       </div>
     </div>
     <div class="modal-foot">
       <button id="modal-del" class="btn-danger-sm hidden" onclick="deleteItem()">Delete</button>
-      <div class="modal-foot-right">
+      <div class="modal-actions">
         <button class="btn-ghost" onclick="closeModal()">Cancel</button>
         <button class="btn-primary" onclick="saveItem()">Save</button>
       </div>
@@ -191,7 +202,7 @@
 
 <!-- NUDGE -->
 <div id="nudge" class="nudge hidden">
-  <span class="nudge-text">You've adjusted intensity in one direction for 3 days — reassess your baseline?</span>
+  <span class="nudge-text">You've shifted intensity the same way for 3 days — consider reassessing your baseline?</span>
   <button class="nudge-action" onclick="setView('settings');dismissNudge()">Reassess</button>
   <button class="nudge-close" onclick="dismissNudge()">✕</button>
 </div>

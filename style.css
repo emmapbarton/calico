@@ -707,3 +707,35 @@ body {
 ::-webkit-scrollbar { width: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--cream-2); border-radius: 3px; }
+
+/* ─── REPEAT / DAY CHIPS ──────────────────── */
+.field-label {
+  font-family: var(--mono-ui); font-size: 9px;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3);
+  display: block; margin-bottom: 6px;
+}
+.day-chips {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.day-chip { cursor: pointer; }
+.day-chip input[type=checkbox] { display: none; }
+.day-chip span {
+  display: inline-block;
+  font-family: var(--mono-ui); font-size: 11px; font-weight: 500;
+  padding: 5px 10px; border-radius: 6px;
+  border: var(--border); background: var(--white); color: var(--ink-2);
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  user-select: none;
+}
+.day-chip input:checked + span {
+  background: var(--ink); color: var(--cream); border-color: var(--ink);
+}
+.day-chip span:hover { border-color: var(--ink); }
+
+.repeat-badge {
+  font-family: var(--mono-ui); font-size: 9px;
+  padding: 2px 7px; border-radius: 4px;
+  background: var(--accent-dim); color: var(--accent);
+  border: 1px solid rgba(232,93,38,0.3);
+  white-space: nowrap;
+}

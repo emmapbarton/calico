@@ -1,3 +1,20 @@
+/* ══════════════════════════════════════════
+   SLIDER FILL — sets --pct CSS var so the
+   orange gradient tracks the thumb position.
+   Call after any slider value change.
+══════════════════════════════════════════ */
+function updateSliderFill(slider) {
+  const min = +slider.min || 1;
+  const max = +slider.max || 10;
+  const val = +slider.value;
+  const pct = ((val - min) / (max - min)) * 100;
+  slider.style.setProperty('--pct', pct + '%');
+}
+
+function updateAllSliderFills() {
+  document.querySelectorAll('.cal-slider, .cal-slider-sm').forEach(updateSliderFill);
+}
+
 'use strict';
 
 /* ══════════════════════════════════════════
@@ -362,10 +379,12 @@ function isDark(hex) {
 function render() {
   updateWeekLabel();
   renderSidebar();
-  if (S.view==='week')     renderWeek();
-  else if (S.view==='agenda') renderAgenda();
+  if (S.view==='week')        renderWeek();
+  else if (S.view==='agenda')   renderAgenda();
   else if (S.view==='settings') renderSettings();
   syncNavButtons();
+  // Update orange fill on all visible sliders after DOM settles
+  requestAnimationFrame(updateAllSliderFills);
 }
 
 function updateWeekLabel() {
@@ -458,8 +477,10 @@ function renderWeek() {
     intRow.appendChild(cell);
   });
   intRow.querySelectorAll('input[type=range]').forEach(s => {
+    updateSliderFill(s);
     s.addEventListener('input', () => {
       const v = +s.value;
+      updateSliderFill(s);
       document.getElementById(`wiv-${s.dataset.d}`).textContent = v;
       setInt(s.dataset.d, v);
     });
@@ -595,8 +616,10 @@ function renderAgenda() {
 
     // Intensity slider
     const slider = dayEl.querySelector('.ag-int-slider');
+    updateSliderFill(slider);
     slider.addEventListener('input', () => {
       const v = +slider.value;
+      updateSliderFill(slider);
       document.getElementById(`aiv-${dStr}`).textContent = v;
       setInt(dStr, v);
     });
@@ -689,6 +712,7 @@ function renderSettings() {
   // Sync baseline slider
   const bs = document.getElementById('settings-baseline-slider');
   bs.value = S.baseline;
+  requestAnimationFrame(() => updateSliderFill(bs));
   document.getElementById('settings-baseline-num').textContent = S.baseline;
   document.getElementById('settings-baseline-desc').textContent = intensityDesc(S.baseline);
 
@@ -1004,6 +1028,9 @@ const INT_DESCS = {
 function intensityDesc(v) { return INT_DESCS[v] || ''; }
 
 document.addEventListener('input', function(e) {
+  if (e.target.classList.contains('cal-slider') || e.target.classList.contains('cal-slider-sm')) {
+    updateSliderFill(e.target);
+  }
   if (e.target.id === 'ob-slider') {
     document.getElementById('ob-num').textContent  = e.target.value;
     document.getElementById('ob-desc').textContent = intensityDesc(+e.target.value);

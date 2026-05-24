@@ -63,17 +63,18 @@ function getInt(dateStr) { return S.intensities[dateStr] ?? S.baseline; }
 
 function setInt(dateStr, val) {
   S.intensities[dateStr] = val;
-  // track direction vs baseline for nudge
-  if (dateStr === ds(today())) {
-    const dir = val > S.baseline ? 'up' : val < S.baseline ? 'down' : 'neutral';
-    const h = S.intensityHistory;
-    const last = h[h.length-1];
-    if (!last || last.date !== dateStr) {
-      h.push({ date: dateStr, dir });
-      if (h.length > 14) h.splice(0, h.length-14);
-    }
-    checkNudge();
+  // track direction vs baseline for nudge — any day, not just today
+  const dir = val > S.baseline ? 'up' : val < S.baseline ? 'down' : 'neutral';
+  const h = S.intensityHistory;
+  const last = h[h.length-1];
+  // update existing entry for this date, or push new one
+  if (last && last.date === dateStr) {
+    last.dir = dir;
+  } else {
+    h.push({ date: dateStr, dir });
+    if (h.length > 30) h.splice(0, h.length - 30);
   }
+  checkNudge();
   save();
   render();
 }

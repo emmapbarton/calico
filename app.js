@@ -116,6 +116,7 @@ function effectiveDist(task) {
 
 function allocate(task) {
   // Returns {dateStr: hours} for all days from today → deadline
+  // Respects event blocking — days with events get proportionally less task time
   const out = {};
   if (!task.deadline) return out;
   const deadline = parseDate(task.deadline);
@@ -130,23 +131,31 @@ function allocate(task) {
   const remaining = Math.max(0, task.hours - (task.logged ?? 0));
   const dist = effectiveDist(task);
 
-  // Base weights
-  let weights = days.map((d,i) => {
+  // Base weights from distribution preference
+  let weights = days.map((d, i) => {
     if (dist === 'even')     return 1;
     if (dist === 'front')    return days.length - i;
     if (dist === 'back')     return i + 1;
-    if (dist === 'weighted') return getInt(d); // more hours on high-intensity days
+    if (dist === 'weighted') return freeHoursOnDay(d);
     return 1;
   });
 
-  // Modulate by intensity ratio
-  weights = weights.map((w,i) => w * (getInt(days[i]) / S.baseline));
+  // Modulate by free hours on each day (intensity × event-awareness)
+  // A day with 0 free hours gets weight 0 — no tasks scheduled there
+  weights = weights.map((w, i) => {
+    const free = freeHoursOnDay(days[i]);
+    return free > 0 ? w * (free / (S.maxDailyHours || 6)) : 0;
+  });
 
-  const total = weights.reduce((a,b)=>a+b,0);
-  if (!total) return out;
-  days.forEach((d,i) => {
-    const h = (weights[i]/total) * remaining;
-    out[d] = Math.round(h * 10) / 10;
+  const total = weights.reduce((a, b) => a + b, 0);
+  if (!total) return out; // no free days — allocate nothing
+
+  days.forEach((d, i) => {
+    if (weights[i] === 0) return; // skip fully blocked days
+    const rawHrs = (weights[i] / total) * remaining;
+    // Cap at the day's free hours so we never exceed what's available
+    const capped = Math.min(rawHrs, freeHoursOnDay(d));
+    out[d] = Math.round(capped * 10) / 10;
   });
   return out;
 }
@@ -226,32 +235,41 @@ function taskRepeatOccursOn(task, dateStr) {
 
 function allocateOccurrence(task, windowStart, deadlineStr) {
   // Allocate task.hours across days in [windowStart .. deadline]
-  // using intensity-weighted distribution, same as the base allocator
+  // Event-aware: days with events get proportionally less task time
   const out = {};
   const start    = parseDate(windowStart);
   const deadline = parseDate(deadlineStr);
   const t        = today();
-  const from     = start > t ? start : t; // never allocate to the past
+  const from     = start > t ? start : t;
 
   const days = [];
   let cur = new Date(from);
   while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur, 1); }
   if (!days.length) return out;
 
-  const hours    = task.hours || 1;
-  const dist     = effectiveDist(task);
-  let weights    = days.map((d, i) => {
+  const hours = task.hours || 1;
+  const dist  = effectiveDist(task);
+
+  let weights = days.map((d, i) => {
     if (dist === 'even')     return 1;
     if (dist === 'front')    return days.length - i;
     if (dist === 'back')     return i + 1;
-    if (dist === 'weighted') return getInt(d);
+    if (dist === 'weighted') return freeHoursOnDay(d);
     return 1;
   });
-  weights = weights.map((w, i) => w * (getInt(days[i]) / S.baseline));
+  weights = weights.map((w, i) => {
+    const free = freeHoursOnDay(days[i]);
+    return free > 0 ? w * (free / (S.maxDailyHours || 6)) : 0;
+  });
+
   const total = weights.reduce((a, b) => a + b, 0);
   if (!total) return out;
+
   days.forEach((d, i) => {
-    out[d] = Math.round((weights[i] / total) * hours * 10) / 10;
+    if (weights[i] === 0) return;
+    const rawHrs = (weights[i] / total) * hours;
+    const capped = Math.min(rawHrs, freeHoursOnDay(d));
+    out[d] = Math.round(capped * 10) / 10;
   });
   return out;
 }
@@ -304,20 +322,36 @@ function totalLoadOnDay(dateStr) {
   ) / 10;
 }
 
+function eventHoursOnDay(dateStr) {
+  // Total hours blocked by events on this day
+  return eventsOnDay(dateStr).reduce((sum, ev) => {
+    const sh = timeH(ev.start || '09:00');
+    const eh = timeH(ev.end   || '10:00');
+    return sum + Math.max(0, eh - sh);
+  }, 0);
+}
+
 function dailyCapacity(dateStr) {
-  // Max task hours available on a given day, scaled by intensity vs baseline
-  const max = S.maxDailyHours || 6;
+  // Raw max task hours scaled by intensity (before event blocking)
+  const max   = S.maxDailyHours || 6;
   const ratio = getInt(dateStr) / (S.baseline || 7);
-  // Linear scale: intensity 0 → 0h, intensity = baseline → max, clamped at max
   return Math.round(Math.min(max, max * ratio) * 10) / 10;
+}
+
+function freeHoursOnDay(dateStr) {
+  // Actual available hours for tasks: capacity minus event time, min 0
+  const cap       = dailyCapacity(dateStr);
+  const eventHrs  = eventHoursOnDay(dateStr);
+  return Math.max(0, Math.round((cap - eventHrs) * 10) / 10);
 }
 
 function dayOverloadLevel(dateStr) {
   // Returns: 'none' | 'mild' | 'hard'
+  // Uses freeHoursOnDay (event-aware) as the real capacity ceiling
   const load = totalLoadOnDay(dateStr);
-  const cap  = dailyCapacity(dateStr);
-  if (load <= cap) return 'none';
-  if (load <= cap * 1.2) return 'mild';
+  const free = freeHoursOnDay(dateStr);
+  if (load <= free) return 'none';
+  if (load <= free * 1.2) return 'mild';
   return 'hard';
 }
 
@@ -549,14 +583,49 @@ function renderWeek() {
       if (block) col.appendChild(block);
     });
 
-    // Tasks stacked from dayStart
-    let stackTop = 0; // px from top of day start
-    tasksOnDay(dStr).forEach(t => {
-      const hrs = taskHoursOnDay(t, dStr);
-      if (hrs <= 0) return;
-      const block = makeWeekBlock(t, 'task', startH, hrs, stackTop);
-      if (block) col.appendChild(block);
-      stackTop += hrs * 52 + 3;
+    // Build a timeline of free slots around events for this day
+    // Mandatory tasks first, then optional — placed in event-free gaps
+    const dayEvents = eventsOnDay(dStr).map(ev => ({
+      start: timeH(ev.start || '09:00'),
+      end:   timeH(ev.end   || '10:00'),
+    })).sort((a, b) => a.start - b.start);
+
+    // Free slots: gaps in [startH, endH] not covered by events
+    const freeSlots = [];
+    let cursor = startH;
+    dayEvents.forEach(ev => {
+      if (ev.start > cursor) freeSlots.push({ start: cursor, end: ev.start });
+      cursor = Math.max(cursor, ev.end);
+    });
+    if (cursor < endH) freeSlots.push({ start: cursor, end: endH });
+
+    // Sort tasks: mandatory first, then optional
+    const dayTasks = tasksOnDay(dStr)
+      .map(t => ({ task: t, hrs: taskHoursOnDay(t, dStr) }))
+      .filter(x => x.hrs > 0)
+      .sort((a, b) => {
+        if (a.task.priority === b.task.priority) return 0;
+        return a.task.priority === 'mandatory' ? -1 : 1;
+      });
+
+    // Place tasks into free slots sequentially
+    let slotIdx = 0;
+    let slotCursor = freeSlots.length ? freeSlots[0].start : startH;
+
+    dayTasks.forEach(({ task: t, hrs }) => {
+      let remaining = hrs;
+      while (remaining > 0.05 && slotIdx < freeSlots.length) {
+        const slot = freeSlots[slotIdx];
+        const available = slot.end - slotCursor;
+        if (available <= 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; continue; }
+        const used   = Math.min(remaining, available);
+        const topPx  = (slotCursor - startH) * 52;
+        const block  = makeWeekBlock(t, 'task', startH, used, topPx);
+        if (block) col.appendChild(block);
+        slotCursor += used;
+        remaining  -= used;
+        if (slotCursor >= slot.end - 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; }
+      }
     });
 
     body.appendChild(col);
@@ -734,15 +803,18 @@ function makeAgendaEntry(item, type, dStr) {
 }
 
 function checkTaskOverload() {
-  // Scan the next 30 days for any hard-overloaded days and warn once
+  // Scan the next 30 days for overloaded days
+  // Uses freeHoursOnDay (event-aware) as the real capacity ceiling
   const days = Array.from({length:30}, (_,i) => ds(addDays(today(), i)));
   setVisibleDays(days);
   const hardDays = days.filter(d => dayOverloadLevel(d) === 'hard');
   if (hardDays.length) {
     const first = hardDays[0];
     const load  = totalLoadOnDay(first);
-    const cap   = dailyCapacity(first);
-    showOverloadToast(`${hardDays.length} day${hardDays.length>1?'s':''} exceed capacity — e.g. ${first}: ${load}h scheduled, ${cap}h available. Consider reducing hours or extending deadlines.`);
+    const free  = freeHoursOnDay(first);
+    const evHrs = Math.round(eventHoursOnDay(first) * 10) / 10;
+    const evNote = evHrs > 0 ? ` (${evHrs}h blocked by events)` : '';
+    showOverloadToast(`${hardDays.length} day${hardDays.length>1?'s':''} exceed capacity — e.g. ${first}: ${load}h of tasks, only ${free}h free${evNote}. Reduce hours, extend deadlines, or mark tasks optional.`);
   }
   // Restore visible days to current week
   const ws = weekStartDate(S.weekOffset);

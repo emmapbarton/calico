@@ -58,7 +58,7 @@ function load() {
    DATE HELPERS
 ══════════════════════════════════════════ */
 function today()         { const d = new Date(); d.setHours(0,0,0,0); return d; }
-function ds(d)           { return d.toISOString().slice(0,10); }
+function ds(d)           { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 function addDays(d, n)   { const r = new Date(d); r.setDate(r.getDate()+n); return r; }
 function parseDate(s)    { return new Date(s + 'T00:00:00'); }
 function fmt(d)          { return d.toLocaleDateString('en-GB', {day:'numeric', month:'short'}); }

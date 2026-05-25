@@ -27,6 +27,7 @@ const DEFAULT_STATE = {
   dayStart: '09:00',
   dayEnd: '18:00',
   maxDailyHours: 6,
+  dayCapOverrides: {},
   view: 'week',
   weekOffset: 0,
   tasks: [],
@@ -115,8 +116,9 @@ function effectiveDist(task) {
 }
 
 function allocate(task) {
-  // Returns {dateStr: hours} for all days from today → deadline
-  // Respects event blocking — days with events get proportionally less task time
+  // Returns {dateStr: hours} for all days from today → deadline.
+  // Uses iterative redistribution: hours that can't fit on a capped day
+  // flow to the next available days, so total always equals remaining.
   const out = {};
   if (!task.deadline) return out;
   const deadline = parseDate(task.deadline);
@@ -125,37 +127,53 @@ function allocate(task) {
 
   const days = [];
   let cur = new Date(t);
-  while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur,1); }
+  while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur, 1); }
   if (!days.length) return out;
 
   const remaining = Math.max(0, task.hours - (task.logged ?? 0));
   const dist = effectiveDist(task);
+  const caps = days.map(d => freeHoursOnDay(d)); // max per day
 
   // Base weights from distribution preference
   let weights = days.map((d, i) => {
     if (dist === 'even')     return 1;
     if (dist === 'front')    return days.length - i;
     if (dist === 'back')     return i + 1;
-    if (dist === 'weighted') return freeHoursOnDay(d);
+    if (dist === 'weighted') return Math.max(0, caps[i]);
     return 1;
   });
+  // Zero out fully blocked days
+  weights = weights.map((w, i) => caps[i] > 0 ? w : 0);
 
-  // Modulate by free hours on each day (intensity × event-awareness)
-  // A day with 0 free hours gets weight 0 — no tasks scheduled there
-  weights = weights.map((w, i) => {
-    const free = freeHoursOnDay(days[i]);
-    return free > 0 ? w * (free / (S.maxDailyHours || 6)) : 0;
-  });
+  // Iterative redistribution: redistribute overflow from capped days
+  const alloc = new Array(days.length).fill(0);
+  const locked = new Array(days.length).fill(false);
+  let toDistribute = remaining;
 
-  const total = weights.reduce((a, b) => a + b, 0);
-  if (!total) return out; // no free days — allocate nothing
+  for (let iter = 0; iter < days.length; iter++) {
+    const freeIdxs = weights.map((w,i) => (!locked[i] && w > 0) ? i : -1).filter(i => i >= 0);
+    if (!freeIdxs.length) break;
+    const wTotal = freeIdxs.reduce((s, i) => s + weights[i], 0);
+    if (!wTotal) break;
+
+    let overflow = 0;
+    freeIdxs.forEach(i => {
+      const raw = (weights[i] / wTotal) * toDistribute;
+      if (raw >= caps[i]) {
+        alloc[i] = caps[i];
+        locked[i] = true;
+        overflow += raw - caps[i];
+      } else {
+        alloc[i] = raw;
+      }
+    });
+
+    toDistribute = overflow;
+    if (toDistribute < 0.01) break;
+  }
 
   days.forEach((d, i) => {
-    if (weights[i] === 0) return; // skip fully blocked days
-    const rawHrs = (weights[i] / total) * remaining;
-    // Cap at the day's free hours so we never exceed what's available
-    const capped = Math.min(rawHrs, freeHoursOnDay(d));
-    out[d] = Math.round(capped * 10) / 10;
+    if (alloc[i] > 0.01) out[d] = Math.round(alloc[i] * 10) / 10;
   });
   return out;
 }
@@ -234,8 +252,7 @@ function taskRepeatOccursOn(task, dateStr) {
 }
 
 function allocateOccurrence(task, windowStart, deadlineStr) {
-  // Allocate task.hours across days in [windowStart .. deadline]
-  // Event-aware: days with events get proportionally less task time
+  // Same iterative redistribution as allocate() but for one occurrence window
   const out = {};
   const start    = parseDate(windowStart);
   const deadline = parseDate(deadlineStr);
@@ -249,27 +266,38 @@ function allocateOccurrence(task, windowStart, deadlineStr) {
 
   const hours = task.hours || 1;
   const dist  = effectiveDist(task);
+  const caps  = days.map(d => freeHoursOnDay(d));
 
   let weights = days.map((d, i) => {
     if (dist === 'even')     return 1;
     if (dist === 'front')    return days.length - i;
     if (dist === 'back')     return i + 1;
-    if (dist === 'weighted') return freeHoursOnDay(d);
+    if (dist === 'weighted') return Math.max(0, caps[i]);
     return 1;
   });
-  weights = weights.map((w, i) => {
-    const free = freeHoursOnDay(days[i]);
-    return free > 0 ? w * (free / (S.maxDailyHours || 6)) : 0;
-  });
+  weights = weights.map((w, i) => caps[i] > 0 ? w : 0);
 
-  const total = weights.reduce((a, b) => a + b, 0);
-  if (!total) return out;
+  const alloc  = new Array(days.length).fill(0);
+  const locked = new Array(days.length).fill(false);
+  let toDistribute = hours;
+
+  for (let iter = 0; iter < days.length; iter++) {
+    const freeIdxs = weights.map((w,i) => (!locked[i] && w > 0) ? i : -1).filter(i => i >= 0);
+    if (!freeIdxs.length) break;
+    const wTotal = freeIdxs.reduce((s, i) => s + weights[i], 0);
+    if (!wTotal) break;
+    let overflow = 0;
+    freeIdxs.forEach(i => {
+      const raw = (weights[i] / wTotal) * toDistribute;
+      if (raw >= caps[i]) { alloc[i] = caps[i]; locked[i] = true; overflow += raw - caps[i]; }
+      else { alloc[i] = raw; }
+    });
+    toDistribute = overflow;
+    if (toDistribute < 0.01) break;
+  }
 
   days.forEach((d, i) => {
-    if (weights[i] === 0) return;
-    const rawHrs = (weights[i] / total) * hours;
-    const capped = Math.min(rawHrs, freeHoursOnDay(d));
-    out[d] = Math.round(capped * 10) / 10;
+    if (alloc[i] > 0.01) out[d] = Math.round(alloc[i] * 10) / 10;
   });
   return out;
 }
@@ -333,7 +361,8 @@ function eventHoursOnDay(dateStr) {
 
 function dailyCapacity(dateStr) {
   // Raw max task hours scaled by intensity (before event blocking)
-  const max   = S.maxDailyHours || 6;
+  // Per-day overrides (from overwork days) take precedence
+  const max   = (S.dayCapOverrides && S.dayCapOverrides[dateStr]) || S.maxDailyHours || 6;
   const ratio = getInt(dateStr) / (S.baseline || 7);
   return Math.round(Math.min(max, max * ratio) * 10) / 10;
 }
@@ -841,38 +870,58 @@ function earliestFittingDeadline(taskHours, fromDeadline) {
   return null;
 }
 
-// Compute total free hours excluding hours currently allocated to a task
+// Compute total free hours in window, excluding one task's contribution.
+// Uses raw capacity - events, not view-dependent taskHoursOnDay.
 function freeHoursExcluding(deadline, excludeTaskId) {
   const t = today();
   const end = parseDate(deadline);
   if (end < t) return 0;
-  let total = 0, cur = new Date(t);
+
+  // Sum of all free hours across the window
+  let totalFree = 0, cur = new Date(t);
   while (cur <= end) {
-    const dStr = ds(cur);
-    let free = freeHoursOnDay(dStr);
-    // Add back hours this task was using (since it's being excluded)
-    if (excludeTaskId) {
-      const task = S.tasks.find(x => x.id === excludeTaskId);
-      if (task) free += taskHoursOnDay(task, dStr);
-    }
-    total += free;
+    totalFree += freeHoursOnDay(ds(cur));
     cur = addDays(cur, 1);
   }
-  return Math.round(total * 10) / 10;
+
+  // Subtract hours already committed to OTHER tasks in the same window
+  // so we don't double-book. Exclude the task being saved.
+  let committed = 0;
+  S.tasks.forEach(t => {
+    if (t.id === excludeTaskId) return;     // skip the task being saved
+    if (t.priority === 'optional') return;  // optional tasks don't block mandatory
+    // Sum what this task uses in the window
+    let taskCur = new Date(today());
+    while (taskCur <= end) {
+      const dStr = ds(taskCur);
+      // Use allocate directly to get view-independent allocation
+      const alloc = allocate(t);
+      committed += alloc[dStr] ?? 0;
+      taskCur = addDays(taskCur, 1);
+    }
+  });
+
+  return Math.max(0, Math.round((totalFree - committed) * 10) / 10);
 }
 
 function computeConflict(taskObj) {
   // Returns conflict info or null if no conflict
-  if (taskObj.priority === 'optional') return null; // optional tasks never conflict
+  if (taskObj.priority === 'optional') return null;
 
-  const avail    = freeHoursExcluding(taskObj.deadline, taskObj.id === editingId ? taskObj.id : null);
-  const needed   = taskObj.hours;
+  // Past deadlines: silently return nothing, no conflict
+  if (parseDate(taskObj.deadline) < today()) return null;
+
+  const avail     = freeHoursExcluding(taskObj.deadline, editingId || null);
+  const needed    = taskObj.hours;
   const shortfall = Math.round((needed - avail) * 10) / 10;
   if (shortfall <= 0) return null;
 
-  const days = freeDaysInWindow(taskObj.deadline);
+  const days      = freeDaysInWindow(taskObj.deadline);
   const suggested = earliestFittingDeadline(needed, taskObj.deadline);
-  return { avail, needed, shortfall, days, suggested };
+
+  // Special case: all time blocked by events
+  const allBlocked = days === 0;
+  return { avail, needed, shortfall, days, suggested, allBlocked };
 }
 
 /* ── State for conflict dialog ── */
@@ -891,8 +940,10 @@ function showConflictDialog(conflict, taskObj) {
 
   // Populate static text
   document.getElementById('conflict-task-name').textContent = taskObj.name + ' — ' + taskObj.hours + 'h estimated';
-  document.getElementById('conflict-summary').textContent =
-    'Only ' + conflict.avail + 'h available before the deadline. ' + conflict.shortfall + 'h cannot be scheduled.';
+  const summaryMsg = conflict.allBlocked
+    ? 'Events fill all available time before the deadline — no free hours remain for tasks.'
+    : 'Only ' + conflict.avail + 'h available before the deadline. ' + conflict.shortfall + 'h cannot be scheduled.';
+  document.getElementById('conflict-summary').textContent = summaryMsg;
   document.getElementById('cs-hours').textContent  = taskObj.hours + 'h';
   document.getElementById('cs-avail').textContent  = conflict.avail + 'h';
   document.getElementById('cs-avail-sub').textContent = 'across ' + conflict.days + ' day' + (conflict.days!==1?'s':'');
@@ -1144,16 +1195,18 @@ function applyConflictResolution() {
     // Reduce hours
     task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
   } else if (selected === 3) {
-    // Overwork days — store as per-day intensity overrides
+    // Overwork days — directly raise maxDailyHours for selected days via a
+    // per-day override stored in S.dayCapOverrides
+    if (!S.dayCapOverrides) S.dayCapOverrides = {};
     const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
     Object.entries(_overworkDays).forEach(([dStr, on]) => {
       if (!on) return;
-      const cur = getInt(dStr);
-      const maxH = S.maxDailyHours || 6;
-      // Convert extra hours to an intensity value
-      const newCap = (cur / S.baseline) * maxH + extra;
-      const newInt = Math.min(10, Math.round((newCap / maxH) * S.baseline * 10) / 10);
-      S.intensities[dStr] = Math.min(10, Math.round(newInt));
+      const eventHrs  = eventHoursOnDay(dStr);
+      const taskHrs   = totalLoadOnDay(dStr); // already scheduled tasks
+      const usedHrs   = eventHrs + taskHrs;
+      // Hard cap: never exceed 24h in a day
+      const hardMax   = Math.min(24, usedHrs + (S.maxDailyHours || 6) + extra) - eventHrs;
+      S.dayCapOverrides[dStr] = Math.max(S.maxDailyHours || 6, hardMax);
     });
   } else if (selected === 4) {
     // Mark optional

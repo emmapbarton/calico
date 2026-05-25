@@ -538,26 +538,6 @@ body {
 .ag-load-lbl { font-family: var(--mono-ui); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
 .ag-load-hrs { font-family: var(--mono-hd); font-size: 18px; font-weight: 700; color: var(--ink); }
 
-.ag-entries { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; }
-
-.ag-entry {
-  display: flex; align-items: center; gap: 10px;
-  padding: 9px 12px; border-radius: var(--r);
-  border: var(--border);
-  cursor: pointer; background: var(--white);
-  transition: border-color 0.1s, box-shadow 0.1s;
-}
-.ag-entry:hover { border-color: var(--ink); box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
-.ag-entry.optional { opacity: 0.55; }
-.ae-ico    { font-size: 14px; color: var(--ink-3); flex-shrink: 0; width: 18px; text-align: center; }
-.ae-name   { flex: 1; font-size: 13px; font-weight: 500; }
-.ae-badges { display: flex; gap: 5px; flex-shrink: 0; }
-.ae-meta   {
-  display: flex; align-items: center; gap: 6px;
-  font-family: var(--mono-ui); font-size: 10px; color: var(--ink-3);
-  white-space: nowrap; flex-shrink: 0;
-}
-
 /* badges — monochrome + orange only */
 .badge {
   font-family: var(--mono-ui);
@@ -571,20 +551,79 @@ body {
 .badge-reduced { background: var(--accent-dim); color: var(--accent); border-color: rgba(232,93,38,0.3); }
 .badge-extra   { background: rgba(0,0,0,0.06); color: var(--ink-2); border-color: var(--cream-3); }
 
-.hrs-editor { display: inline-flex; align-items: center; gap: 3px; }
-.hrs-editor button {
-  background: none; border: 1px solid var(--cream-2);
-  border-radius: 4px; width: 18px; height: 18px;
-  font-size: 13px; cursor: pointer; color: var(--ink-2);
-  display: flex; align-items: center; justify-content: center;
-  padding: 0; transition: background 0.1s, border-color 0.1s;
+/* ── Event strips (compact, one per line) ── */
+.ag-event-strips {
+  padding: 5px 12px 4px;
+  border-bottom: var(--border-sm);
+  display: flex; flex-direction: column; gap: 3px;
 }
-.hrs-editor button:hover { background: var(--cream-2); border-color: var(--ink); }
-.hrs-editor .hrs-num {
-  font-family: var(--mono-ui); font-size: 10px;
-  min-width: 38px; text-align: center;
+.ag-event-strip {
+  display: flex; align-items: center; gap: 7px;
+  padding: 4px 6px; border-radius: 5px;
+  cursor: pointer; font-size: 11px;
+  transition: background 0.1s;
 }
-.ag-empty { padding: 12px 14px; font-size: 12px; color: var(--ink-3); font-style: italic; }
+.ag-event-strip:hover { background: var(--cream-2); }
+.ag-strip-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.ag-strip-name { font-weight: 500; color: var(--ink); }
+.ag-strip-time { font-family: var(--mono-ui); font-size: 10px; color: var(--ink-3); }
+
+/* ── Task rows (clean, no inline editor) ── */
+.ag-task-rows {
+  padding: 6px 10px 8px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+.ag-task-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; border-radius: var(--r);
+  border: var(--border); background: var(--white);
+  cursor: pointer; transition: border-color 0.1s, box-shadow 0.1s;
+}
+.ag-task-row:hover { border-color: var(--ink); box-shadow: 0 2px 6px rgba(0,0,0,0.06); }
+.ag-task-row.optional { opacity: 0.55; }
+.ag-task-accent {
+  width: 3px; height: 26px; border-radius: 2px;
+  background: var(--task-color, var(--ink));
+  flex-shrink: 0;
+}
+.ag-task-name   { flex: 1; font-size: 13px; font-weight: 500; color: var(--ink); }
+.ag-task-badges { display: flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; align-items: center; }
+.ag-task-hrs    {
+  font-family: var(--mono-hd); font-size: 14px; font-weight: 700;
+  color: var(--ink); white-space: nowrap; flex-shrink: 0; min-width: 36px; text-align: right;
+}
+
+/* ── Overload states on load cell ── */
+.ag-load.load-mild { background: rgba(232,93,38,0.08); }
+.ag-load.load-hard { background: rgba(232,93,38,0.18); }
+.ag-load.load-mild .ag-load-hrs,
+.ag-load.load-hard .ag-load-hrs { color: var(--accent); }
+.ag-load-cap {
+  font-family: var(--mono-ui); font-size: 9px;
+  color: var(--accent); letter-spacing: 0.04em; margin-top: 1px;
+}
+
+/* ── Intensity value low indicator ── */
+.ag-int-val.int-low { color: var(--accent); }
+
+/* ── Overload toast (persistent, dismissible) ── */
+.overload-toast {
+  position: fixed; bottom: 5rem; left: 50%;
+  transform: translateX(-50%);
+  background: var(--accent); color: var(--white);
+  border-radius: var(--r-lg); padding: 12px 16px;
+  display: flex; align-items: flex-start; gap: 12px;
+  box-shadow: 0 8px 32px rgba(232,93,38,0.35);
+  z-index: 400; font-size: 12px; line-height: 1.5;
+  max-width: 560px; width: 94%;
+}
+.overload-toast-text { flex: 1; }
+.overload-toast button {
+  background: none; border: none; color: rgba(255,255,255,0.7);
+  cursor: pointer; font-size: 14px; padding: 0; flex-shrink: 0;
+}
+
+.ag-empty { padding: 10px 14px; font-size: 12px; color: var(--ink-3); font-style: italic; }
 
 /* ─── SETTINGS ────────────────────────────── */
 .settings-body {

@@ -26,6 +26,7 @@ const DEFAULT_STATE = {
   distribution: 'even',
   dayStart: '09:00',
   dayEnd: '18:00',
+  maxDailyHours: 6,
   view: 'week',
   weekOffset: 0,
   tasks: [],
@@ -303,6 +304,23 @@ function totalLoadOnDay(dateStr) {
   ) / 10;
 }
 
+function dailyCapacity(dateStr) {
+  // Max task hours available on a given day, scaled by intensity vs baseline
+  const max = S.maxDailyHours || 6;
+  const ratio = getInt(dateStr) / (S.baseline || 7);
+  // Linear scale: intensity 0 → 0h, intensity = baseline → max, clamped at max
+  return Math.round(Math.min(max, max * ratio) * 10) / 10;
+}
+
+function dayOverloadLevel(dateStr) {
+  // Returns: 'none' | 'mild' | 'hard'
+  const load = totalLoadOnDay(dateStr);
+  const cap  = dailyCapacity(dateStr);
+  if (load <= cap) return 'none';
+  if (load <= cap * 1.2) return 'mild';
+  return 'hard';
+}
+
 function tasksOnDay(dateStr) {
   return S.tasks.filter(t => taskHoursOnDay(t, dateStr) > 0);
 }
@@ -313,36 +331,40 @@ function eventOccursOn(ev, dateStr) {
   }
   const start  = parseDate(ev.date);
   const target = parseDate(dateStr);
+  // target must be on or after start date (inclusive)
   if (target < start) return false;
 
-  // Check repeat end
+  // Check repeat end — inclusive on end date
   if (ev.repeatEndType === 'date' && ev.repeatEndDate) {
     if (target > parseDate(ev.repeatEndDate)) return false;
   }
 
   const dow = target.getDay(); // 0=Sun, 1=Mon … 6=Sat
+  const startDow = start.getDay();
 
   if (ev.repeat === 'daily')    return true;
-  if (ev.repeat === 'weekly')   return dow === start.getDay();
+  if (ev.repeat === 'weekly')   return dow === startDow;
   if (ev.repeat === 'weekdays') return dow >= 1 && dow <= 5;
   if (ev.repeat === 'weekends') return dow === 0 || dow === 6;
   if (ev.repeat === 'custom')   return (ev.repeatDays || []).includes(dow);
   if (ev.repeat === 'interval') {
     const interval = ev.repeatInterval || 7;
-    const diff = Math.round((target - start) / 86400000);
+    // Use date-only diff to avoid DST issues
+    const diffMs = target.getTime() - start.getTime();
+    const diff   = Math.round(diffMs / 86400000);
     return diff >= 0 && diff % interval === 0;
   }
   return false;
 }
 
 function countOccurrencesBefore(ev, dateStr) {
-  // Count how many times ev occurs from ev.date up to (not including) dateStr
+  // Count occurrences from ev.date up to but NOT including dateStr
   if (!ev.repeat || ev.repeat === 'none') return 0;
   const start  = parseDate(ev.date);
   const target = parseDate(dateStr);
-  let count = 0;
-  let cur = new Date(start);
-  while (cur < target) {
+  let count = 0, cur = new Date(start);
+  // Walk from start up to (not including) target
+  while (cur.getTime() < target.getTime()) {
     if (eventOccursOn(ev, ds(cur))) count++;
     cur = addDays(cur, 1);
   }
@@ -575,12 +597,20 @@ function renderAgenda() {
   body.innerHTML = '';
 
   days.forEach((d, i) => {
-    const dStr = ds(d);
-    const isT  = dStr === todayStr;
-    const val  = getInt(dStr);
-    const load = totalLoadOnDay(dStr);
+    const dStr   = ds(d);
+    const isT    = dStr === todayStr;
+    const val    = getInt(dStr);
+    const load   = totalLoadOnDay(dStr);
+    const cap    = dailyCapacity(dStr);
+    const overload = dayOverloadLevel(dStr);
     const tasks  = tasksOnDay(dStr);
     const events = eventsOnDay(dStr);
+
+    // Overload class for load cell
+    const loadClass = overload === 'hard' ? ' load-hard'
+                    : overload === 'mild' ? ' load-mild' : '';
+    const loadTitle  = overload !== 'none'
+      ? ` title="${load}h scheduled, ${cap}h capacity"` : '';
 
     const dayEl = document.createElement('div');
     dayEl.className = 'ag-day';
@@ -594,25 +624,49 @@ function renderAgenda() {
           <div class="ag-int-lbl">Intensity</div>
           <div class="ag-int-row">
             <input type="range" class="ag-int-slider cal-slider-sm" min="1" max="10" value="${val}" data-d="${dStr}">
-            <div class="ag-int-val" id="aiv-${dStr}">${val}</div>
+            <div class="ag-int-val${val < S.baseline ? ' int-low' : ''}" id="aiv-${dStr}">${val}</div>
           </div>
         </div>
-        <div class="ag-load">
+        <div class="ag-load${loadClass}"${loadTitle}>
           <div class="ag-load-lbl">Load</div>
           <div class="ag-load-hrs">${load}h</div>
+          ${overload !== 'none' ? `<div class="ag-load-cap">${cap}h cap</div>` : ''}
         </div>
       </div>`;
 
-    const entries = document.createElement('div');
-    entries.className = 'ag-entries';
+    // Event strips (compact one-liners)
+    if (events.length) {
+      const strips = document.createElement('div');
+      strips.className = 'ag-event-strips';
+      events.forEach(ev => {
+        const rl = repeatLabel(ev);
+        const strip = document.createElement('div');
+        strip.className = 'ag-event-strip';
+        strip.innerHTML = `
+          <span class="ag-strip-dot" style="background:${ev.color||'#111'}"></span>
+          <span class="ag-strip-name">${ev.name}</span>
+          <span class="ag-strip-time">${ev.start}–${ev.end}</span>
+          ${rl ? `<span class="repeat-badge">${rl}</span>` : ''}`;
+        strip.onclick = () => openModal('event', ev.id);
+        strips.appendChild(strip);
+      });
+      dayEl.appendChild(strips);
+    }
+
+    // Task rows
+    if (tasks.length) {
+      const taskWrap = document.createElement('div');
+      taskWrap.className = 'ag-task-rows';
+      tasks.forEach(t => taskWrap.appendChild(makeAgendaTaskRow(t, dStr)));
+      dayEl.appendChild(taskWrap);
+    }
 
     if (!events.length && !tasks.length) {
-      entries.innerHTML = '<div class="ag-empty">Nothing scheduled</div>';
+      const empty = document.createElement('div');
+      empty.className = 'ag-empty';
+      empty.textContent = 'Nothing scheduled';
+      dayEl.appendChild(empty);
     }
-    events.forEach(ev => entries.appendChild(makeAgendaEntry(ev, 'event', dStr)));
-    tasks.forEach(t  => entries.appendChild(makeAgendaEntry(t, 'task', dStr)));
-
-    dayEl.appendChild(entries);
 
     // Intensity slider
     const slider = dayEl.querySelector('.ag-int-slider');
@@ -637,59 +691,72 @@ function repeatLabel(ev) {
   return map[ev.repeat] || '';
 }
 
-function makeAgendaEntry(item, type, dStr) {
+function makeAgendaTaskRow(task, dStr) {
   const el = document.createElement('div');
-  el.className = `ag-entry${item.priority==='optional'?' optional':''}`;
-  const color = item.color || '#111';
-  el.style.borderLeft = `3px solid ${color}`;
-  el.style.borderRadius = '6px';
+  el.className = `ag-task-row${task.priority==='optional'?' optional':''}`;
+  const color = task.color || '#111';
+  el.style.setProperty('--task-color', color);
 
-  let metaHtml = '';
+  const hrs = taskHoursOnDay(task, dStr);
+  const avg = task.hours / Math.max(1, daysRemaining(task));
   let redistBadge = '';
+  if (hrs < avg * 0.85) redistBadge = `<span class="badge badge-reduced">↓ reduced</span>`;
+  else if (hrs > avg * 1.15) redistBadge = `<span class="badge badge-extra">↑ extra</span>`;
 
-  if (type === 'task') {
-    const hrs = taskHoursOnDay(item, dStr);
-    const avg = item.hours / Math.max(1, daysRemaining(item));
-    if (hrs < avg * 0.85) redistBadge = `<span class="badge badge-reduced">↓ reduced</span>`;
-    else if (hrs > avg * 1.15) redistBadge = `<span class="badge badge-extra">↑ extra</span>`;
-    const taskRl = repeatLabel(item);
-    metaHtml = `${hrs}h ${redistBadge}
-      ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
-      <div class="hrs-editor">
-        <button class="he-minus" title="Reduce hours per occurrence">−</button>
-        <span class="hrs-num">${item.hours}h</span>
-        <button class="he-plus" title="Increase hours per occurrence">+</button>
-      </div>`;
-  } else {
-    const rl = repeatLabel(item);
-    metaHtml = `${item.start}–${item.end}${rl ? ` <span class="repeat-badge">${rl}</span>` : ''}`;
-  }
-
-  const typeBadge  = type==='task'
-    ? `<span class="badge badge-task">task</span>`
-    : `<span class="badge badge-event">event</span>`;
-  const priBadge   = item.priority==='optional'
+  const taskRl   = repeatLabel(task);
+  const priBadge = task.priority === 'optional'
     ? `<span class="badge badge-opt">optional</span>` : '';
+  const mandBadge = task.priority === 'mandatory'
+    ? `<span class="badge">mandatory</span>` : '';
 
   el.innerHTML = `
-    <div class="ae-ico">${type==='task' ? '✎' : '◷'}</div>
-    <div class="ae-name">${item.name}</div>
-    <div class="ae-badges">${typeBadge}${priBadge}</div>
-    <div class="ae-meta">${metaHtml}</div>`;
+    <div class="ag-task-accent"></div>
+    <div class="ag-task-name">${task.name}</div>
+    <div class="ag-task-badges">
+      ${mandBadge}${priBadge}
+      ${redistBadge}
+      ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
+    </div>
+    <div class="ag-task-hrs">${hrs}h</div>`;
 
-  if (type === 'task') {
-    el.querySelector('.he-minus').addEventListener('click', e => {
-      e.stopPropagation();
-      adjustHours(item.id, -0.5);
-    });
-    el.querySelector('.he-plus').addEventListener('click', e => {
-      e.stopPropagation();
-      adjustHours(item.id, 0.5);
-    });
-  }
-
-  el.addEventListener('click', () => openModal(type, item.id));
+  el.addEventListener('click', () => openModal('task', task.id));
   return el;
+}
+
+function makeAgendaEntry(item, type, dStr) {
+  // Kept for any legacy callers — routes to correct renderer
+  if (type === 'task') return makeAgendaTaskRow(item, dStr);
+  // Events are now rendered as strips, this shouldn't be called for events
+  return document.createElement('div');
+}
+
+function checkTaskOverload() {
+  // Scan the next 30 days for any hard-overloaded days and warn once
+  const days = Array.from({length:30}, (_,i) => ds(addDays(today(), i)));
+  setVisibleDays(days);
+  const hardDays = days.filter(d => dayOverloadLevel(d) === 'hard');
+  if (hardDays.length) {
+    const first = hardDays[0];
+    const load  = totalLoadOnDay(first);
+    const cap   = dailyCapacity(first);
+    showOverloadToast(`${hardDays.length} day${hardDays.length>1?'s':''} exceed capacity — e.g. ${first}: ${load}h scheduled, ${cap}h available. Consider reducing hours or extending deadlines.`);
+  }
+  // Restore visible days to current week
+  const ws = weekStartDate(S.weekOffset);
+  setVisibleDays(Array.from({length:7}, (_,i) => ds(addDays(ws,i))));
+}
+
+function showOverloadToast(msg) {
+  const existing = document.getElementById('overload-toast');
+  if (existing) existing.remove();
+  const el = document.createElement('div');
+  el.id = 'overload-toast';
+  el.className = 'overload-toast';
+  el.innerHTML = `<span class="overload-toast-text">${msg}</span>
+    <button onclick="this.parentElement.remove()">✕</button>`;
+  document.body.appendChild(el);
+  // Auto-dismiss after 8s
+  setTimeout(() => { if (el.parentNode) el.remove(); }, 8000);
 }
 
 function adjustHours(id, delta) {
@@ -723,6 +790,10 @@ function renderSettings() {
   // Sync working hours
   document.getElementById('settings-day-start').value = S.dayStart;
   document.getElementById('settings-day-end').value   = S.dayEnd;
+
+  // Sync max daily hours
+  const mdh = document.getElementById('settings-max-daily-hours');
+  if (mdh) mdh.value = S.maxDailyHours || 6;
 }
 
 function saveBaseline() {
@@ -744,6 +815,8 @@ function saveDist() {
 function saveWorkingHours() {
   S.dayStart = document.getElementById('settings-day-start').value;
   S.dayEnd   = document.getElementById('settings-day-end').value;
+  const mdh  = document.getElementById('settings-max-daily-hours');
+  if (mdh) S.maxDailyHours = Math.max(1, parseFloat(mdh.value) || 6);
   save(); render();
   showToast('Working hours saved');
 }
@@ -968,6 +1041,9 @@ function saveItem() {
   document.getElementById('modal-bg').classList.add('hidden');
   editingId = null;
   save(); render();
+
+  // Check for overload after saving a task
+  if (type === 'task') checkTaskOverload();
 }
 
 function deleteItem() {

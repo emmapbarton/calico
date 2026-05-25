@@ -802,6 +802,384 @@ function makeAgendaEntry(item, type, dStr) {
   return document.createElement('div');
 }
 
+/* ══════════════════════════════════════════
+   CONFLICT RESOLUTION SYSTEM
+══════════════════════════════════════════ */
+
+// Compute total free hours across a task's window (today → deadline)
+function totalFreeHoursInWindow(deadline) {
+  const t = today();
+  const end = parseDate(deadline);
+  if (end < t) return 0;
+  let total = 0, cur = new Date(t);
+  while (cur <= end) {
+    total += freeHoursOnDay(ds(cur));
+    cur = addDays(cur, 1);
+  }
+  return Math.round(total * 10) / 10;
+}
+
+// Count free days in window
+function freeDaysInWindow(deadline) {
+  const t = today();
+  const end = parseDate(deadline);
+  let n = 0, cur = new Date(t);
+  while (cur <= end) { if (freeHoursOnDay(ds(cur)) > 0) n++; cur = addDays(cur, 1); }
+  return n;
+}
+
+// Find earliest deadline where taskHours fits
+function earliestFittingDeadline(taskHours, fromDeadline) {
+  const t = today();
+  let cumFree = 0, cur = new Date(t);
+  // Walk up to 2 years forward
+  for (let i = 0; i < 730; i++) {
+    cumFree += freeHoursOnDay(ds(cur));
+    if (cumFree >= taskHours) return ds(cur);
+    cur = addDays(cur, 1);
+  }
+  return null;
+}
+
+// Compute total free hours excluding hours currently allocated to a task
+function freeHoursExcluding(deadline, excludeTaskId) {
+  const t = today();
+  const end = parseDate(deadline);
+  if (end < t) return 0;
+  let total = 0, cur = new Date(t);
+  while (cur <= end) {
+    const dStr = ds(cur);
+    let free = freeHoursOnDay(dStr);
+    // Add back hours this task was using (since it's being excluded)
+    if (excludeTaskId) {
+      const task = S.tasks.find(x => x.id === excludeTaskId);
+      if (task) free += taskHoursOnDay(task, dStr);
+    }
+    total += free;
+    cur = addDays(cur, 1);
+  }
+  return Math.round(total * 10) / 10;
+}
+
+function computeConflict(taskObj) {
+  // Returns conflict info or null if no conflict
+  if (taskObj.priority === 'optional') return null; // optional tasks never conflict
+
+  const avail    = freeHoursExcluding(taskObj.deadline, taskObj.id === editingId ? taskObj.id : null);
+  const needed   = taskObj.hours;
+  const shortfall = Math.round((needed - avail) * 10) / 10;
+  if (shortfall <= 0) return null;
+
+  const days = freeDaysInWindow(taskObj.deadline);
+  const suggested = earliestFittingDeadline(needed, taskObj.deadline);
+  return { avail, needed, shortfall, days, suggested };
+}
+
+/* ── State for conflict dialog ── */
+let _conflictTask = null;   // the task obj being resolved
+let _conflictData = null;   // {avail, needed, shortfall, days, suggested}
+let _overworkDays = {};     // dateStr → bool
+let _demotedTasks = {};     // task id → bool
+let _intensityOverrides = {}; // dateStr → newVal
+
+function showConflictDialog(conflict, taskObj) {
+  _conflictTask = taskObj;
+  _conflictData = conflict;
+  _overworkDays = {};
+  _demotedTasks = {};
+  _intensityOverrides = {};
+
+  // Populate static text
+  document.getElementById('conflict-task-name').textContent = taskObj.name + ' — ' + taskObj.hours + 'h estimated';
+  document.getElementById('conflict-summary').textContent =
+    'Only ' + conflict.avail + 'h available before the deadline. ' + conflict.shortfall + 'h cannot be scheduled.';
+  document.getElementById('cs-hours').textContent  = taskObj.hours + 'h';
+  document.getElementById('cs-avail').textContent  = conflict.avail + 'h';
+  document.getElementById('cs-avail-sub').textContent = 'across ' + conflict.days + ' day' + (conflict.days!==1?'s':'');
+  document.getElementById('cs-short').textContent  = '−' + conflict.shortfall + 'h';
+
+  // Suggestion
+  const sugText = document.getElementById('csug-text');
+  if (conflict.suggested) {
+    const sugD = parseDate(conflict.suggested);
+    const sugFmt = sugD.toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+    sugText.innerHTML = '<strong>Extend deadline to ' + sugFmt + '.</strong> That's the earliest date where all ' + taskObj.hours + 'h can be fully scheduled at your current intensity.';
+    document.getElementById('conflict-suggestion').classList.remove('hidden');
+  } else {
+    document.getElementById('conflict-suggestion').classList.add('hidden');
+  }
+
+  // Option 1 — deadline picker
+  document.getElementById('copt-deadline').value = conflict.suggested || taskObj.deadline;
+  updateDeadlineBadge();
+
+  // Option 2 — hours reduction
+  document.getElementById('copt-hours').value = conflict.avail;
+  document.getElementById('copt-hours-note').textContent = 'Max that fits by current deadline: ' + conflict.avail + 'h';
+
+  // Option 3 — overwork day chips
+  buildOverworkChips();
+
+  // Option 4 — save note
+  document.getElementById('copt-saveas-note').textContent =
+    conflict.shortfall + 'h will remain unscheduled. Overload warnings will appear on affected days.';
+
+  // Option 5 — other mandatory tasks
+  buildDemoteList();
+
+  // Option 6 — intensity rows
+  buildIntensityRows();
+
+  // Select nothing by default
+  for (let i=1;i<=7;i++) document.getElementById('copt-'+i)?.classList.remove('selected');
+
+  document.getElementById('conflict-bg').classList.remove('hidden');
+}
+
+function closeConflict() {
+  document.getElementById('conflict-bg').classList.add('hidden');
+  _pendingTask = null;
+  _conflictTask = null;
+}
+
+function discardConflictTask() {
+  closeConflict();
+  // Task was never committed, so nothing to remove
+}
+
+function selectCopt(n) {
+  for (let i=1;i<=7;i++) {
+    const el = document.getElementById('copt-'+i);
+    if (el) el.classList.toggle('selected', i===n);
+  }
+}
+
+function applySuggestion() {
+  if (!_conflictData?.suggested) return;
+  document.getElementById('copt-deadline').value = _conflictData.suggested;
+  updateDeadlineBadge();
+  selectCopt(1);
+}
+
+function updateDeadlineBadge() {
+  const val = document.getElementById('copt-deadline').value;
+  if (!val || !_conflictTask) return;
+  const avail = totalFreeHoursInWindow(val);
+  const shortfall = Math.round((_conflictTask.hours - avail) * 10) / 10;
+  const badge = document.getElementById('copt-deadline-badge');
+  const note  = document.getElementById('copt-deadline-note');
+  if (shortfall <= 0) {
+    badge.textContent = '+' + Math.round((avail - _conflictTask.hours)*10)/10 + 'h freed';
+    badge.className = 'copt-badge ok';
+    note.textContent = 'All ' + _conflictTask.hours + 'h can be scheduled by this date.';
+  } else {
+    badge.textContent = 'still −' + shortfall + 'h short';
+    badge.className = 'copt-badge';
+    note.textContent = 'Choose a later date to fully resolve the conflict.';
+  }
+}
+
+document.addEventListener('input', function(e) {
+  if (e.target.id === 'copt-deadline') updateDeadlineBadge();
+});
+
+function buildOverworkChips() {
+  const container = document.getElementById('copt-day-chips');
+  container.innerHTML = '';
+  const t = today();
+  const end = parseDate(_conflictTask.deadline);
+  let cur = new Date(t);
+  while (cur <= end) {
+    const dStr = ds(cur);
+    const chip = document.createElement('div');
+    chip.className = 'copt-day-chip';
+    chip.textContent = cur.toLocaleDateString('en-GB', {weekday:'short', day:'numeric'});
+    chip.dataset.date = dStr;
+    chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _overworkDays[dStr] = !_overworkDays[dStr];
+      chip.classList.toggle('on', !!_overworkDays[dStr]);
+      updateOverworkBadge();
+    });
+    container.appendChild(chip);
+    cur = addDays(cur, 1);
+  }
+  updateOverworkBadge();
+}
+
+function updateOverworkBadge() {
+  const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
+  const days = Object.values(_overworkDays).filter(Boolean).length;
+  const freed = Math.round(days * extra * 10) / 10;
+  const badge = document.getElementById('copt-overwork-badge');
+  badge.textContent = freed > 0 ? '+' + freed + 'h freed' : '0h freed';
+  badge.className = freed >= (_conflictData?.shortfall||0) ? 'copt-badge ok' : 'copt-badge';
+}
+
+function buildDemoteList() {
+  const container = document.getElementById('copt-other-tasks');
+  container.innerHTML = '';
+  // Other mandatory tasks sorted by hours desc
+  const others = S.tasks
+    .filter(t => t.id !== _conflictTask.id && t.priority === 'mandatory' && t.deadline >= ds(today()))
+    .sort((a,b) => b.hours - a.hours);
+
+  if (!others.length) {
+    container.innerHTML = '<span class="copt-note">No other mandatory tasks to demote.</span>';
+    return;
+  }
+
+  others.forEach(t => {
+    const item = document.createElement('div');
+    item.className = 'copt-task-item';
+    item.innerHTML = `<div class="copt-check"></div>
+      <div class="copt-task-name">${t.name}</div>
+      <div class="copt-task-hrs">${t.hours}h</div>`;
+    item.addEventListener('click', e => {
+      e.stopPropagation();
+      _demotedTasks[t.id] = !_demotedTasks[t.id];
+      item.classList.toggle('checked', !!_demotedTasks[t.id]);
+      item.querySelector('.copt-check').textContent = _demotedTasks[t.id] ? '✓' : '';
+      updateDemoteBadge();
+    });
+    container.appendChild(item);
+  });
+  updateDemoteBadge();
+}
+
+function updateDemoteBadge() {
+  let freed = 0;
+  Object.entries(_demotedTasks).forEach(([id, checked]) => {
+    if (!checked) return;
+    const t = S.tasks.find(x => x.id === id);
+    if (t) freed += t.hours;
+  });
+  freed = Math.round(freed * 10) / 10;
+  const badge = document.getElementById('copt-demote-badge');
+  badge.textContent = freed + 'h freed';
+  badge.className = freed >= (_conflictData?.shortfall||0) ? 'copt-badge ok' : 'copt-badge';
+}
+
+function buildIntensityRows() {
+  const container = document.getElementById('copt-int-rows');
+  container.innerHTML = '';
+  const t = today();
+  const end = parseDate(_conflictTask.deadline);
+  const baseline = S.baseline;
+  let lowDays = [];
+  let cur = new Date(t);
+  while (cur <= end) {
+    const dStr = ds(cur);
+    const intVal = getInt(dStr);
+    if (intVal < baseline) lowDays.push({ dStr, intVal, d: new Date(cur) });
+    cur = addDays(cur, 1);
+  }
+
+  if (!lowDays.length) {
+    container.innerHTML = '<span class="copt-note">No days below your baseline in this window.</span>';
+    document.getElementById('copt-int-badge').textContent = '0h';
+    return;
+  }
+
+  lowDays.forEach(({ dStr, intVal, d }) => {
+    const row = document.createElement('div');
+    row.className = 'copt-int-row';
+    const dayLabel = d.toLocaleDateString('en-GB', {weekday:'short', day:'numeric'});
+    row.innerHTML = `<div class="copt-int-day">${dayLabel}</div>
+      <div class="copt-int-from">${intVal} →</div>
+      <input type="number" class="copt-input copt-int-input" value="${baseline}" min="${intVal}" max="10" data-date="${dStr}" data-orig="${intVal}">
+      <span class="copt-badge" id="cib-${dStr}"></span>`;
+    container.appendChild(row);
+  });
+
+  container.querySelectorAll('.copt-int-input').forEach(inp => {
+    inp.addEventListener('input', e => { e.stopPropagation(); updateIntBadges(); });
+    inp.addEventListener('click', e => e.stopPropagation());
+  });
+  updateIntBadges();
+}
+
+function updateIntBadges() {
+  let totalFreed = 0;
+  document.querySelectorAll('.copt-int-input').forEach(inp => {
+    const dStr = inp.dataset.date;
+    const orig = +inp.dataset.orig;
+    const newVal = Math.min(10, Math.max(orig, +inp.value || orig));
+    _intensityOverrides[dStr] = newVal;
+    // Extra free hours = freeHours at new intensity - freeHours at old intensity
+    const maxH = S.maxDailyHours || 6;
+    const oldFree = Math.max(0, (orig / S.baseline) * maxH - eventHoursOnDay(dStr));
+    const newFree = Math.max(0, (newVal / S.baseline) * maxH - eventHoursOnDay(dStr));
+    const extra   = Math.round((newFree - oldFree) * 10) / 10;
+    totalFreed += extra;
+    const badge = document.getElementById('cib-' + dStr);
+    if (badge) { badge.textContent = extra > 0 ? '+' + extra + 'h' : '0h'; }
+  });
+  totalFreed = Math.round(totalFreed * 10) / 10;
+  const badge = document.getElementById('copt-int-badge');
+  if (badge) badge.textContent = totalFreed + 'h freed';
+  const note = document.getElementById('copt-int-note');
+  if (note) note.textContent = totalFreed < (_conflictData?.shortfall||0) ? '— best combined with another option' : '';
+  const cls = totalFreed >= (_conflictData?.shortfall||0) ? 'copt-badge ok' : 'copt-badge';
+  if (badge) badge.className = cls;
+}
+
+function applyConflictResolution() {
+  // Find selected option
+  let selected = 0;
+  for (let i=1;i<=7;i++) {
+    if (document.getElementById('copt-'+i)?.classList.contains('selected')) { selected = i; break; }
+  }
+  if (!selected) { showToast('Please select a resolution option'); return; }
+
+  const task = { ..._conflictTask };
+
+  if (selected === 1) {
+    // Extend deadline
+    const newDeadline = document.getElementById('copt-deadline').value;
+    if (!newDeadline) { showToast('Please set a new deadline'); return; }
+    task.deadline = newDeadline;
+    if (!task.repeat || task.repeat === 'none') task.date = newDeadline;
+  } else if (selected === 2) {
+    // Reduce hours
+    task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
+  } else if (selected === 3) {
+    // Overwork days — store as per-day intensity overrides
+    const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
+    Object.entries(_overworkDays).forEach(([dStr, on]) => {
+      if (!on) return;
+      const cur = getInt(dStr);
+      const maxH = S.maxDailyHours || 6;
+      // Convert extra hours to an intensity value
+      const newCap = (cur / S.baseline) * maxH + extra;
+      const newInt = Math.min(10, Math.round((newCap / maxH) * S.baseline * 10) / 10);
+      S.intensities[dStr] = Math.min(10, Math.round(newInt));
+    });
+  } else if (selected === 4) {
+    // Mark optional
+    task.priority = 'optional';
+  } else if (selected === 5) {
+    // Demote other tasks
+    Object.entries(_demotedTasks).forEach(([id, checked]) => {
+      if (!checked) return;
+      const t = S.tasks.find(x => x.id === id);
+      if (t) t.priority = 'optional';
+    });
+  } else if (selected === 6) {
+    // Apply intensity overrides
+    Object.entries(_intensityOverrides).forEach(([dStr, val]) => {
+      S.intensities[dStr] = val;
+    });
+  }
+  // Option 7: save anyway — no changes to task
+
+  // Commit the task
+  _commitTask(task, _pendingTask?.editingId || null);
+  closeConflict();
+  save(); render();
+  showToast('Saved');
+}
+
 function checkTaskOverload() {
   // Scan the next 30 days for overloaded days
   // Uses freeHoursOnDay (event-aware) as the real capacity ceiling
@@ -1073,12 +1451,6 @@ function saveItem() {
         obj.repeatInterval = parseInt(document.getElementById('f-task-interval').value) || 7;
       }
     }
-    if (editingId) {
-      const i = S.tasks.findIndex(x=>x.id===editingId);
-      if (i>=0) { obj.logged = S.tasks[i].logged ?? 0; S.tasks[i] = obj; }
-    } else {
-      S.tasks.push(obj);
-    }
   } else {
     const repeatVal = document.getElementById('f-repeat').value;
     const obj = {
@@ -1113,12 +1485,35 @@ function saveItem() {
     }
   }
 
+  // For tasks: check if it fits before committing
+  if (type === 'task') {
+    const conflict = computeConflict(obj);
+    if (conflict) {
+      // Don't commit yet — store pending and show conflict dialog
+      _pendingTask = { obj, editingId, isEdit: !!editingId };
+      document.getElementById('modal-bg').classList.add('hidden');
+      showConflictDialog(conflict, obj);
+      return;
+    }
+  }
+
+  // No conflict — commit normally
+  _commitTask(obj, editingId);
   document.getElementById('modal-bg').classList.add('hidden');
   editingId = null;
   save(); render();
+}
 
-  // Check for overload after saving a task
-  if (type === 'task') checkTaskOverload();
+let _pendingTask = null;
+
+function _commitTask(obj, eid) {
+  if (eid) {
+    const i = S.tasks.findIndex(x => x.id === eid);
+    if (i >= 0) { obj.logged = S.tasks[i].logged ?? 0; S.tasks[i] = obj; }
+    else S.tasks.push(obj);
+  } else {
+    S.tasks.push(obj);
+  }
 }
 
 function deleteItem() {
@@ -1143,6 +1538,7 @@ document.addEventListener('click', function(e) {
     syncColourPicker();
   }
   if (e.target.id === 'modal-bg') closeModal();
+  if (e.target.id === 'conflict-bg') closeConflict();
 });
 
 /* ══════════════════════════════════════════

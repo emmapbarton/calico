@@ -903,7 +903,7 @@ function showConflictDialog(conflict, taskObj) {
   if (conflict.suggested) {
     const sugD = parseDate(conflict.suggested);
     const sugFmt = sugD.toLocaleDateString('en-GB', {day:'numeric', month:'short'});
-    sugText.innerHTML = '<strong>Extend deadline to ' + sugFmt + '.</strong> That's the earliest date where all ' + taskObj.hours + 'h can be fully scheduled at your current intensity.';
+    sugText.innerHTML = '<strong>Extend deadline to ' + sugFmt + '.</strong> That\'s the earliest date where all ' + taskObj.hours + 'h can be fully scheduled at your current intensity.';
     document.getElementById('conflict-suggestion').classList.remove('hidden');
   } else {
     document.getElementById('conflict-suggestion').classList.add('hidden');
@@ -1427,14 +1427,13 @@ function saveItem() {
       id: editingId || uid(),
       type: 'task', name, priority, color,
       deadline: document.getElementById('f-deadline').value,
-      date:     document.getElementById('f-deadline').value, // repeat start = deadline for non-repeating
+      date:     document.getElementById('f-deadline').value,
       hours:    parseFloat(document.getElementById('f-hours').value) || 4,
       dist:     document.getElementById('f-dist').value,
       logged:   0,
       repeat:   repeatVal,
     };
     if (repeatVal !== 'none') {
-      // For repeating tasks, f-task-start-date is the repeat start
       obj.date = document.getElementById('f-task-start-date').value || obj.deadline;
       const endType = document.getElementById('f-task-repeat-end-type').value;
       obj.repeatEndType = endType;
@@ -1451,7 +1450,24 @@ function saveItem() {
         obj.repeatInterval = parseInt(document.getElementById('f-task-interval').value) || 7;
       }
     }
+
+    // Check conflict before committing
+    const conflict = computeConflict(obj);
+    if (conflict) {
+      _pendingTask = { obj, editingId: editingId, isEdit: !!editingId };
+      document.getElementById('modal-bg').classList.add('hidden');
+      showConflictDialog(conflict, obj);
+      return;
+    }
+
+    // No conflict — commit
+    _commitTask(obj, editingId);
+    document.getElementById('modal-bg').classList.add('hidden');
+    editingId = null;
+    save(); render();
+
   } else {
+    // Event — save directly
     const repeatVal = document.getElementById('f-repeat').value;
     const obj = {
       id: editingId || uid(),
@@ -1478,30 +1494,15 @@ function saveItem() {
       }
     }
     if (editingId) {
-      const i = S.events.findIndex(x=>x.id===editingId);
-      if (i>=0) S.events[i] = obj;
+      const i = S.events.findIndex(x => x.id === editingId);
+      if (i >= 0) S.events[i] = obj;
     } else {
       S.events.push(obj);
     }
+    document.getElementById('modal-bg').classList.add('hidden');
+    editingId = null;
+    save(); render();
   }
-
-  // For tasks: check if it fits before committing
-  if (type === 'task') {
-    const conflict = computeConflict(obj);
-    if (conflict) {
-      // Don't commit yet — store pending and show conflict dialog
-      _pendingTask = { obj, editingId, isEdit: !!editingId };
-      document.getElementById('modal-bg').classList.add('hidden');
-      showConflictDialog(conflict, obj);
-      return;
-    }
-  }
-
-  // No conflict — commit normally
-  _commitTask(obj, editingId);
-  document.getElementById('modal-bg').classList.add('hidden');
-  editingId = null;
-  save(); render();
 }
 
 let _pendingTask = null;

@@ -331,13 +331,17 @@ function eventOccursOn(ev, dateStr) {
   }
   const start  = parseDate(ev.date);
   const target = parseDate(dateStr);
-  // target must be on or after start date (inclusive)
+
+  // Must be on or after start date
   if (target < start) return false;
 
   // Check repeat end — inclusive on end date
   if (ev.repeatEndType === 'date' && ev.repeatEndDate) {
     if (target > parseDate(ev.repeatEndDate)) return false;
   }
+
+  // The start date itself always counts — user explicitly chose it
+  if (dateStr === ev.date) return true;
 
   const dow = target.getDay(); // 0=Sun, 1=Mon … 6=Sat
   const startDow = start.getDay();
@@ -349,7 +353,6 @@ function eventOccursOn(ev, dateStr) {
   if (ev.repeat === 'custom')   return (ev.repeatDays || []).includes(dow);
   if (ev.repeat === 'interval') {
     const interval = ev.repeatInterval || 7;
-    // Use date-only diff to avoid DST issues
     const diffMs = target.getTime() - start.getTime();
     const diff   = Math.round(diffMs / 86400000);
     return diff >= 0 && diff % interval === 0;

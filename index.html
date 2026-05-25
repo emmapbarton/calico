@@ -312,6 +312,176 @@
 <!-- TOAST -->
 <div id="toast" class="toast hidden"></div>
 
+
+<!-- CONFLICT RESOLUTION MODAL -->
+<div id="conflict-bg" class="modal-bg hidden">
+  <div class="modal conflict-modal" onclick="event.stopPropagation()">
+
+    <div class="conflict-modal-head">
+      <div>
+        <div class="conflict-eyebrow">Scheduling conflict</div>
+        <div class="conflict-title">Not enough time</div>
+      </div>
+      <button class="modal-x" onclick="closeConflict()">✕</button>
+    </div>
+
+    <div class="conflict-bar">
+      <div class="conflict-bar-text">
+        <strong id="conflict-task-name">Task name</strong>
+        <span id="conflict-summary"></span>
+      </div>
+    </div>
+
+    <div class="conflict-stats">
+      <div class="cstat"><div class="cstat-label">Task hours</div><div class="cstat-val bad" id="cs-hours">0h</div><div class="cstat-sub">estimated</div></div>
+      <div class="cstat"><div class="cstat-label">Available</div><div class="cstat-val" id="cs-avail">0h</div><div class="cstat-sub" id="cs-avail-sub">across N days</div></div>
+      <div class="cstat"><div class="cstat-label">Shortfall</div><div class="cstat-val bad" id="cs-short">0h</div><div class="cstat-sub">needs resolving</div></div>
+    </div>
+
+    <div class="conflict-suggestion" id="conflict-suggestion">
+      <div class="csug-head">
+        <span class="csug-eyebrow">Calico suggests</span>
+        <span class="csug-badge">Best fit</span>
+      </div>
+      <div class="csug-body">
+        <div class="csug-text" id="csug-text"></div>
+        <button class="csug-apply" onclick="applySuggestion()">Apply →</button>
+      </div>
+    </div>
+
+    <div class="conflict-opts-label">Or choose your own fix</div>
+    <div class="conflict-opts" id="conflict-opts">
+
+      <div class="copt" id="copt-1" onclick="selectCopt(1)">
+        <div class="copt-head">
+          <div class="copt-icon">⇥</div>
+          <div class="copt-text"><div class="copt-label">Extend the deadline</div><div class="copt-sub">Push deadline until enough time is available</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <div class="copt-row">
+              <span class="copt-field-label">New deadline</span>
+              <input type="date" id="copt-deadline" class="copt-input">
+              <span class="copt-badge" id="copt-deadline-badge"></span>
+            </div>
+            <span class="copt-note" id="copt-deadline-note"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="copt" id="copt-2" onclick="selectCopt(2)">
+        <div class="copt-head">
+          <div class="copt-icon">↓</div>
+          <div class="copt-text"><div class="copt-label">Reduce estimated hours</div><div class="copt-sub">Adjust scope to fit the available time</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <div class="copt-row">
+              <span class="copt-field-label">New estimate</span>
+              <input type="number" id="copt-hours" class="copt-input" min="0.5" step="0.5" style="width:80px">
+              <span class="copt-badge ok" id="copt-hours-badge">fits exactly</span>
+            </div>
+            <span class="copt-note" id="copt-hours-note"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="copt" id="copt-3" onclick="selectCopt(3)">
+        <div class="copt-head">
+          <div class="copt-icon">↑</div>
+          <div class="copt-text"><div class="copt-label">Allow overwork days</div><div class="copt-sub">Pick days to exceed your normal capacity</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <div class="copt-chips" id="copt-day-chips"></div>
+            <div class="copt-row" style="margin-top:6px">
+              <span class="copt-field-label">Extra hrs/day</span>
+              <input type="number" id="copt-extra-hrs" class="copt-input" value="2" min="0.5" step="0.5" style="width:70px" oninput="updateOverworkBadge()">
+              <span class="copt-badge" id="copt-overwork-badge"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="copt" id="copt-4" onclick="selectCopt(4)">
+        <div class="copt-head">
+          <div class="copt-icon">◎</div>
+          <div class="copt-text"><div class="copt-label">Mark this task as optional</div><div class="copt-sub">Schedule only if time allows — no conflict raised</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <span class="copt-note">This task will be deprioritised. Mandatory tasks are always scheduled first. This task fills whatever time remains — some hours may go unscheduled without warning.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="copt" id="copt-5" onclick="selectCopt(5)">
+        <div class="copt-head">
+          <div class="copt-icon">≎</div>
+          <div class="copt-text"><div class="copt-label">Demote other tasks to optional</div><div class="copt-sub">Free up time by deprioritising lower-priority work</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <span class="copt-note" style="margin-bottom:6px;display:block">Tick tasks to demote. Their allocated time becomes available for this task.</span>
+            <div class="copt-task-list" id="copt-other-tasks"></div>
+            <div class="copt-row" style="margin-top:6px">
+              <span class="copt-field-label">Total freed</span>
+              <span class="copt-badge" id="copt-demote-badge">0h</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="copt" id="copt-6" onclick="selectCopt(6)">
+        <div class="copt-head">
+          <div class="copt-icon">⟳</div>
+          <div class="copt-text"><div class="copt-label">Redistribute intensity</div><div class="copt-sub">Raise low-intensity days to unlock more capacity</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <span class="copt-note" style="margin-bottom:6px;display:block">Days below your baseline in this task's window. Raising them adds capacity.</span>
+            <div id="copt-int-rows"></div>
+            <div class="copt-row" style="margin-top:6px">
+              <span class="copt-field-label">Total freed</span>
+              <span class="copt-badge" id="copt-int-badge">0h</span>
+              <span class="copt-note" id="copt-int-note"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="copt" id="copt-7" onclick="selectCopt(7)">
+        <div class="copt-head">
+          <div class="copt-icon">≡</div>
+          <div class="copt-text"><div class="copt-label">Save anyway</div><div class="copt-sub">Schedule what fits, flag the rest — resolve later</div></div>
+          <span class="copt-arrow">▾</span>
+        </div>
+        <div class="copt-body">
+          <div class="copt-inner">
+            <span class="copt-note" id="copt-saveas-note"></span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="conflict-foot">
+      <button class="btn-warn" onclick="discardConflictTask()">Discard task</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn-ghost" onclick="closeConflict()">Back</button>
+        <button class="btn-primary" onclick="applyConflictResolution()">Apply →</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

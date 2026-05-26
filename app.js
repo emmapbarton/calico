@@ -648,7 +648,7 @@ function renderWeek() {
         const available = slot.end - slotCursor;
         if (available <= 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; continue; }
         const used   = Math.min(remaining, available);
-        const topPx  = (slotCursor - startH) * 52;
+        const topPx  = (slotCursor - startH) * 54;
         const block  = makeWeekBlock(t, 'task', startH, used, topPx);
         if (block) col.appendChild(block);
         slotCursor += used;
@@ -673,13 +673,13 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
     const sh = timeH(item.start || '09:00');
     const eh = timeH(item.end   || '10:00');
     const dur = Math.max(eh - sh, 0.25);
-    block.style.top    = ((sh - startH) * 52) + 'px';
-    block.style.height = (dur * 52 - 2) + 'px';
+    block.style.top    = ((sh - startH) * 54) + 'px';
+    block.style.height = (dur * 54) + 'px';
     block.innerHTML = `<div class="wk-block-title">${item.name}</div>
       <div class="wk-block-sub">${item.start}–${item.end}</div>`;
   } else {
     block.style.top    = stackTop + 'px';
-    block.style.height = (hours * 52 - 2) + 'px';
+    block.style.height = (hours * 54) + 'px';
     block.innerHTML = `<div class="wk-block-title">${item.name}</div>
       <div class="wk-block-sub">${hours}h</div>`;
   }

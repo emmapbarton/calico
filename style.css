@@ -1130,3 +1130,29 @@ body {
   font-family: var(--mono-ui);
 }
 .ag-redist-icon { font-size: 13px; flex-shrink: 0; }
+
+/* ─── 24H WEEK VIEW ───────────────────────── */
+.wk-hr-line.working     { background: var(--white); }
+.wk-hr-line.non-working { background: rgba(0,0,0,0.022); }
+.wk-time-slot.wk-working-hour { color: var(--ink-3); }
+.wk-time-slot           { color: var(--ink-4); opacity: 0.7; }
+.wk-time-slot.wk-working-hour { opacity: 1; }
+
+/* Drag over highlight */
+.wk-day-col.drag-over   { background: rgba(232,93,38,0.07) !important; outline: 2px dashed var(--accent); outline-offset: -2px; }
+
+/* ─── SKIP BUTTON ─────────────────────────── */
+.ag-skip-btn {
+  background: none;
+  border: var(--border);
+  border-radius: 6px;
+  padding: 3px 9px;
+  font-family: var(--mono-ui);
+  font-size: 10px;
+  color: var(--ink-3);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+.ag-skip-btn:hover { border-color: var(--ink); color: var(--ink); }

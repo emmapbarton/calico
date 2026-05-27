@@ -194,12 +194,14 @@ function allocate(task) {
     let overflow = 0;
     freeIdxs.forEach(i => {
       const raw = (weights[i] / wTotal) * toDistribute;
-      if (raw >= caps[i]) {
+      const newTotal = alloc[i] + raw;
+      if (newTotal >= caps[i]) {
+        // Adding this raw would exceed cap — give only what's left, lock the day
+        overflow += newTotal - caps[i];
         alloc[i] = caps[i];
         locked[i] = true;
-        overflow += raw - caps[i];
       } else {
-        alloc[i] += raw; // accumulate across iterations, not overwrite
+        alloc[i] = newTotal; // safe to accumulate
       }
     });
 
@@ -333,7 +335,11 @@ function allocateOccurrence(task, windowStart, deadlineStr) {
     freeIdxs.forEach(i => {
       const raw = (weights[i] / wTotal) * toDistribute;
       if (raw >= caps[i]) { alloc[i] = caps[i]; locked[i] = true; overflow += raw - caps[i]; }
-      else { alloc[i] += raw; } // accumulate across iterations
+      else {
+        const newTot = alloc[i] + raw;
+        if (newTot >= caps[i]) { overflow += newTot - caps[i]; alloc[i] = caps[i]; locked[i] = true; }
+        else { alloc[i] = newTot; }
+      }
     });
     toDistribute = overflow;
     if (toDistribute < 0.01) break;

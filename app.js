@@ -118,6 +118,96 @@ function effectiveDist(task) {
   return task.dist === 'inherit' ? S.distribution : task.dist;
 }
 
+function allocateWithConsumed(task, consumed) {
+  // Allocate a single task, respecting hours already consumed by higher-priority tasks
+  // consumed: {dateStr → hours already taken}
+  // Returns {dateStr: hours}
+  const out = {};
+  if (!task.deadline) return out;
+  const deadline = parseDate(task.deadline);
+  const t = today();
+  if (deadline < t) return out;
+
+  const notBefore = task.notBefore ? parseDate(task.notBefore) : null;
+  const days = [];
+  let cur = new Date(t);
+  while (cur <= deadline) {
+    const dStr = ds(cur);
+    if (!notBefore || cur >= notBefore) days.push(dStr);
+    cur = addDays(cur, 1);
+  }
+  if (!days.length) return out;
+
+  let loggedShortfall = 0;
+  Object.entries(S.taskLog).forEach(([key, entry]) => {
+    const [tid, dStr] = key.split('|');
+    if (tid !== task.id) return;
+    if (parseDate(dStr) >= today()) return;
+    const gap = Math.max(0, (entry.scheduled || 0) - (entry.completed ?? entry.scheduled ?? 0));
+    loggedShortfall += gap;
+  });
+  const baseRemaining = Math.max(0, task.hours - (task.logged ?? 0) + loggedShortfall);
+
+  const pinned = {};
+  let pinnedTotal = 0;
+  days.forEach(d => {
+    const pKey = task.id + '|' + d;
+    if (S.pinnedAllocations[pKey] !== undefined) {
+      // Pinned hours respect consumed hours too
+      const free = freeHoursOnDay(d, consumed[d] || 0);
+      pinned[d] = Math.min(S.pinnedAllocations[pKey], free);
+      pinnedTotal += pinned[d];
+      out[d] = Math.round(pinned[d] * 10) / 10;
+    }
+  });
+  const unpinnedDays = days.filter(d => pinned[d] === undefined);
+  const remaining = Math.max(0, baseRemaining - pinnedTotal);
+  if (!unpinnedDays.length || remaining < 0.01) return out;
+
+  const dist = effectiveDist(task);
+  // Caps now account for hours consumed by higher-priority tasks
+  const caps = unpinnedDays.map(d => freeHoursOnDay(d, consumed[d] || 0));
+
+  let weights = unpinnedDays.map((d, i) => {
+    if (dist === 'even')     return 1;
+    if (dist === 'front')    return unpinnedDays.length - i;
+    if (dist === 'back')     return i + 1;
+    if (dist === 'weighted') return Math.max(0, caps[i]);
+    return 1;
+  });
+  weights = weights.map((w, i) => caps[i] > 0 ? w : 0);
+
+  const alloc  = new Array(unpinnedDays.length).fill(0);
+  const locked = new Array(unpinnedDays.length).fill(false);
+  let toDistribute = remaining;
+
+  for (let iter = 0; iter < unpinnedDays.length; iter++) {
+    const freeIdxs = weights.map((w,i) => (!locked[i] && w > 0) ? i : -1).filter(i => i >= 0);
+    if (!freeIdxs.length) break;
+    const wTotal = freeIdxs.reduce((s, i) => s + weights[i], 0);
+    if (!wTotal) break;
+    let overflow = 0;
+    freeIdxs.forEach(i => {
+      const raw = (weights[i] / wTotal) * toDistribute;
+      const newTotal = alloc[i] + raw;
+      if (newTotal >= caps[i]) {
+        overflow += newTotal - caps[i];
+        alloc[i] = caps[i];
+        locked[i] = true;
+      } else {
+        alloc[i] = newTotal;
+      }
+    });
+    toDistribute = overflow;
+    if (toDistribute < 0.01) break;
+  }
+
+  unpinnedDays.forEach((d, i) => {
+    if (alloc[i] > 0.01) out[d] = Math.round(alloc[i] * 10) / 10;
+  });
+  return out;
+}
+
 function allocate(task) {
   // Returns {dateStr: hours} for all days from today → deadline.
   // Uses iterative redistribution: hours that can't fit on a capped day
@@ -353,7 +443,7 @@ function allocateOccurrence(task, windowStart, deadlineStr) {
 
 // Cache of allocations per task per visible week to avoid recomputation
 let _allocCache = {};
-function clearAllocCache() { _allocCache = {}; }
+function clearAllocCache() { _allocCache = {}; clearMasterAlloc(); }
 
 function getAllocations(task, visibleDays) {
   // Returns {dateStr: hours} for all visible days, summed across occurrences
@@ -389,8 +479,11 @@ let _visibleDays = [];
 function setVisibleDays(days) { _visibleDays = days; clearAllocCache(); }
 
 function taskHoursOnDay(task, dateStr) {
-  if (!_visibleDays.length) return allocate(task)[dateStr] ?? 0;
-  return getAllocations(task, _visibleDays)[dateStr] ?? 0;
+  // Use master allocation which coordinates across all tasks
+  const master = getMasterAlloc();
+  if (master[task.id]) return master[task.id][dateStr] ?? 0;
+  // Fallback for tasks not yet in master (shouldn't happen)
+  return allocate(task)[dateStr] ?? 0;
 }
 
 function totalLoadOnDay(dateStr) {
@@ -417,11 +510,55 @@ function dailyCapacity(dateStr) {
   return Math.round(Math.min(base, base * ratio) * 10) / 10;
 }
 
-function freeHoursOnDay(dateStr) {
-  // Actual available hours for tasks: capacity minus event time, min 0
-  const cap       = dailyCapacity(dateStr);
-  const eventHrs  = eventHoursOnDay(dateStr);
-  return Math.max(0, Math.round((cap - eventHrs) * 10) / 10);
+function freeHoursOnDay(dateStr, consumed) {
+  // Actual available hours: capacity minus events minus already-consumed by other tasks
+  const cap      = dailyCapacity(dateStr);
+  const eventHrs = eventHoursOnDay(dateStr);
+  const used     = consumed || 0;
+  return Math.max(0, Math.round((cap - eventHrs - used) * 10) / 10);
+}
+
+// Master allocation cache — computed once per render for all tasks together
+let _masterAlloc = null; // {taskId: {dateStr: hours}}
+let _masterAllocKey = ''; // cache key
+
+function getMasterAlloc() {
+  // Build a cache key from tasks + intensities + events + settings
+  const key = JSON.stringify({
+    tasks: S.tasks.map(t => ({id:t.id,hours:t.hours,deadline:t.deadline,priority:t.priority,dist:t.dist,notBefore:t.notBefore,pinned:S.pinnedAllocations})),
+    baseline: S.baseline, maxDailyHours: S.maxDailyHours,
+    intensities: S.intensities, events: S.events.map(e=>e.id+e.date+e.start+e.end+e.repeat)
+  });
+  if (_masterAlloc && _masterAllocKey === key) return _masterAlloc;
+
+  // Allocate all tasks in priority order: mandatory first, then optional
+  const sorted = [...S.tasks].sort((a, b) => {
+    if (a.priority === b.priority) return 0;
+    return a.priority === 'mandatory' ? -1 : 1;
+  });
+
+  // Track consumed hours per day across all tasks
+  const consumed = {}; // dateStr → hours consumed
+  const result   = {}; // taskId → {dateStr → hours}
+
+  sorted.forEach(task => {
+    // Temporarily override freeHoursOnDay to use consumed hours
+    const alloc = allocateWithConsumed(task, consumed);
+    result[task.id] = alloc;
+    // Mark those hours as consumed
+    Object.entries(alloc).forEach(([d, h]) => {
+      consumed[d] = (consumed[d] || 0) + h;
+    });
+  });
+
+  _masterAlloc    = result;
+  _masterAllocKey = key;
+  return result;
+}
+
+function clearMasterAlloc() {
+  _masterAlloc    = null;
+  _masterAllocKey = '';
 }
 
 function dayOverloadLevel(dateStr) {

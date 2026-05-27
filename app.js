@@ -27,7 +27,8 @@ const DEFAULT_STATE = {
   dayStart: '09:00',
   dayEnd: '18:00',
   maxDailyHours: 8,
-  dayCapOverrides: {},
+  dayCapOverrides: {},      // deprecated legacy global overwork; ignored by allocator
+  taskOverworkAllowances: {}, // 'taskId|deadline|dateStr' → extra hours for that task occurrence only
   view: 'week',
   weekOffset: 0,
   tasks: [],
@@ -170,13 +171,12 @@ function buildDailyCapacity(days) {
 
   days.forEach(dStr => {
     // Raw capacity = maxDailyHours × intensityRatio
-    const override = S.dayCapOverrides && S.dayCapOverrides[dStr];
     const base     = S.maxDailyHours || 8;
     const ratio    = getInt(dStr) / Math.max(1, S.baseline || 7);
     // Intensity can exceed baseline (ratio > 1) to allow more capacity.
-    // dayCapOverrides is treated as a final one-day capacity override, used by
-    // the conflict dialog's overwork option. Otherwise capacity scales normally.
-    const rawCap   = override !== undefined ? +override : base * ratio;
+    // IMPORTANT: dayCapOverrides is legacy global overwork and is deliberately
+    // ignored here. Overwork is now task-scoped via taskOverworkAllowances.
+    const rawCap   = base * ratio;
     // Hard cap: never exceed 24h (physical limit of a day).
     const cap      = Math.round(Math.min(24, Math.max(0, rawCap)) * 100) / 100;
     capacity[dStr] = cap;
@@ -367,11 +367,38 @@ function eventsOnDay(dateStr) {
   });
 }
 
+
+function overworkKeyForOccurrence(occ, dateStr) {
+  return occ.taskId + '|' + occ.deadline + '|' + dateStr;
+}
+
+function taskScopedOverworkFor(occ, dateStr) {
+  if (!S.taskOverworkAllowances) return 0;
+  return +(S.taskOverworkAllowances[overworkKeyForOccurrence(occ, dateStr)] || 0);
+}
+
+function pinnedHoursForOccurrence(occ, dateStr) {
+  if (!S.pinnedAllocations) return undefined;
+
+  // New occurrence-scoped pin format for future use.
+  const occKey = occ.occId + '|' + dateStr;
+  if (S.pinnedAllocations[occKey] !== undefined) return S.pinnedAllocations[occKey];
+
+  // Legacy pins are only safe for non-repeating single-occurrence tasks.
+  // For repeating tasks, taskId|date pins can corrupt every occurrence, so ignore them.
+  if (occ.occId === occ.taskId) {
+    const legacyKey = occ.taskId + '|' + dateStr;
+    if (S.pinnedAllocations[legacyKey] !== undefined) return S.pinnedAllocations[legacyKey];
+  }
+
+  return undefined;
+}
+
 /* ─── Step 4: Allocate each occurrence ──────────────────────── */
 function allocateOccurrence(occ, remainingCapacity) {
-  // Place occ.hours across occ.windowStart → occ.deadline
-  // using remainingCapacity[dateStr] as the per-day ceiling
-  // Returns {dateStr: hours} and updates remainingCapacity in place
+  // Place occ.hours across occ.windowStart → occ.deadline.
+  // Uses normal remainingCapacity first, then task-scoped overwork allowance.
+  // Overwork never increases global capacity for other tasks.
   const out = {};
   const todayDate = today();
   const deadline  = parseDate(occ.deadline);
@@ -381,27 +408,30 @@ function allocateOccurrence(occ, remainingCapacity) {
 
   if (deadline < todayDate) return out;
 
-  // Collect eligible days
   const days = [];
   let cur = new Date(winStart);
   while (cur <= deadline) {
     const dStr = ds(cur);
-    if (remainingCapacity[dStr] > 0.001) days.push(dStr);
+    const effectiveCap = (remainingCapacity[dStr] || 0) + taskScopedOverworkFor(occ, dStr);
+    if (effectiveCap > 0.001) days.push(dStr);
     cur = addDays(cur, 1);
   }
   if (!days.length) return out;
 
-  // Handle pinned days first
-  let pinned = {};
+  const pinned = {};
   let pinnedTotal = 0;
   days.forEach(d => {
-    const pKey = occ.taskId + '|' + d;
-    if (S.pinnedAllocations && S.pinnedAllocations[pKey] !== undefined) {
-      const ph = Math.min(S.pinnedAllocations[pKey], remainingCapacity[d]);
-      pinned[d] = ph;
-      pinnedTotal += ph;
-      out[d] = Math.round(ph * 100) / 100;
-      remainingCapacity[d] = Math.max(0, remainingCapacity[d] - ph);
+    const pinnedH = pinnedHoursForOccurrence(occ, d);
+    if (pinnedH !== undefined) {
+      const capForThisTask = (remainingCapacity[d] || 0) + taskScopedOverworkFor(occ, d);
+      const ph = Math.min(+pinnedH || 0, capForThisTask);
+      if (ph > 0.001) {
+        pinned[d] = ph;
+        pinnedTotal += ph;
+        out[d] = Math.round(ph * 100) / 100;
+        const normalUse = Math.min(remainingCapacity[d] || 0, ph);
+        remainingCapacity[d] = Math.max(0, Math.round(((remainingCapacity[d] || 0) - normalUse) * 100) / 100);
+      }
     }
   });
 
@@ -410,9 +440,8 @@ function allocateOccurrence(occ, remainingCapacity) {
   if (!unpinned.length || toPlace < 0.001) return out;
 
   const dist = occ.dist || 'even';
-  const caps = unpinned.map(d => remainingCapacity[d]);
+  const caps = unpinned.map(d => (remainingCapacity[d] || 0) + taskScopedOverworkFor(occ, d));
 
-  // Base weights
   let weights = unpinned.map((d, i) => {
     if (dist === 'even')     return 1;
     if (dist === 'front')    return unpinned.length - i;
@@ -422,7 +451,6 @@ function allocateOccurrence(occ, remainingCapacity) {
   });
   weights = weights.map((w, i) => caps[i] > 0.001 ? w : 0);
 
-  // Iterative redistribution respecting caps
   const alloc  = new Array(unpinned.length).fill(0);
   const locked = new Array(unpinned.length).fill(false);
 
@@ -447,11 +475,12 @@ function allocateOccurrence(occ, remainingCapacity) {
     toPlace = overflow;
   }
 
-  // Write to output and update remainingCapacity
   unpinned.forEach((d, i) => {
     if (alloc[i] > 0.001) {
-      out[d] = Math.round(alloc[i] * 100) / 100;
-      remainingCapacity[d] = Math.max(0, remainingCapacity[d] - alloc[i]);
+      const h = Math.round(alloc[i] * 100) / 100;
+      out[d] = h;
+      const normalUse = Math.min(remainingCapacity[d] || 0, h);
+      remainingCapacity[d] = Math.max(0, Math.round(((remainingCapacity[d] || 0) - normalUse) * 100) / 100);
     }
   });
 
@@ -471,6 +500,7 @@ function allocateSchedule() {
     baseline: S.baseline,
     maxDailyHours: S.maxDailyHours,
     dayCapOverrides: S.dayCapOverrides,
+    taskOverworkAllowances: S.taskOverworkAllowances,
     pinnedAllocations: S.pinnedAllocations,
     taskLog: S.taskLog,
     distribution: S.distribution,
@@ -623,69 +653,108 @@ function dayOverloadLevel(dateStr) {
 }
 
 /* ─── Conflict check for saving a new task ───────────────────── */
+function allocationForHypotheticalTask(taskObj, deadlineOverride) {
+  const originalTasks = S.tasks.slice();
+  const tempId = taskObj.id || '__temp__';
+  const tempTask = { ...taskObj, id: tempId };
+  if (deadlineOverride) tempTask.deadline = deadlineOverride;
+
+  // Validate as a replacement, not as an extra duplicate.
+  S.tasks = S.tasks.filter(t => t.id !== tempId && t.id !== editingId);
+  S.tasks.push(tempTask);
+  invalidatePlan();
+
+  const plan = allocateSchedule();
+  const allocated = Object.values(plan.allocations[tempId] || {}).reduce((s,h) => s + h, 0);
+
+  S.tasks = originalTasks;
+  invalidatePlan();
+
+  return { allocated, plan };
+}
+
 function computeConflict(taskObj) {
   if (taskObj.priority === 'optional') return null;
   if (parseDate(taskObj.deadline) < today()) return null;
 
-  // Temporarily add this task to state, run engine, check result, then remove
-  const tempId = '__temp__';
-  const tempTask = { ...taskObj, id: tempId };
-  S.tasks.push(tempTask);
-  invalidatePlan();
-
-  const plan      = allocateSchedule();
-  const allocated = Object.values(plan.allocations[tempId] || {}).reduce((s,h) => s+h, 0);
+  const { allocated, plan } = allocationForHypotheticalTask(taskObj);
   const shortfall = Math.round((taskObj.hours - allocated) * 100) / 100;
 
-  // Count free days in window
-  const todayDate = today();
-  const deadline  = parseDate(taskObj.deadline);
   let freeDays = 0;
-  let cur = new Date(todayDate);
+  let cur = new Date(today());
+  const deadline = parseDate(taskObj.deadline);
   while (cur <= deadline) {
     if ((plan.dailyFree[ds(cur)] ?? 0) > 0) freeDays++;
     cur = addDays(cur, 1);
   }
 
-  // Remove temp task and invalidate
-  S.tasks = S.tasks.filter(t => t.id !== tempId);
-  invalidatePlan();
-
   if (shortfall <= 0.05) return null;
-
-  // Find earliest fitting deadline
-  const suggested = findEarliestFittingDeadline(taskObj);
 
   return {
     avail:       Math.round(allocated * 100) / 100,
     needed:      taskObj.hours,
     shortfall,
     days:        freeDays,
-    suggested,
+    suggested:   findEarliestFittingDeadline(taskObj),
     allBlocked:  freeDays === 0,
   };
 }
 
 function findEarliestFittingDeadline(taskObj) {
-  // Binary-search-style: walk forward until temp task fits
-  const tempId   = '__temp2__';
-  const todayDate = today();
   let cur = parseDate(taskObj.deadline);
-  const hardLimit = addDays(todayDate, 365);
+  const hardLimit = addDays(today(), 365);
 
   for (let i = 0; i < 365; i++) {
     cur = addDays(cur, 1);
     if (cur > hardLimit) return null;
-    const temp = { ...taskObj, id: tempId, deadline: ds(cur) };
-    S.tasks.push(temp);
-    invalidatePlan();
-    const plan      = allocateSchedule();
-    const allocated = Object.values(plan.allocations[tempId] || {}).reduce((s,h) => s+h, 0);
-    S.tasks = S.tasks.filter(t => t.id !== tempId);
-    invalidatePlan();
+    const { allocated } = allocationForHypotheticalTask(taskObj, ds(cur));
     if (allocated >= taskObj.hours - 0.05) return ds(cur);
   }
   return null;
+}
+
+function conflictInfoForExistingTask(task) {
+  const plan = allocateSchedule();
+  const info = plan.conflicts && plan.conflicts[task.id];
+  if (!info) return null;
+
+  let freeDays = 0;
+  let cur = new Date(today());
+  const deadline = parseDate(task.deadline);
+  while (cur <= deadline) {
+    if ((plan.dailyFree[ds(cur)] ?? 0) > 0) freeDays++;
+    cur = addDays(cur, 1);
+  }
+
+  return {
+    avail:      Math.round((info.allocated || 0) * 100) / 100,
+    needed:     Math.round((info.needed || task.hours) * 100) / 100,
+    shortfall:  Math.round((info.shortfall || 0) * 100) / 100,
+    days:       freeDays,
+    suggested:  findEarliestFittingDeadline(task),
+    allBlocked: freeDays === 0,
+  };
+}
+
+function revalidateExistingTasks(showDialog) {
+  invalidatePlan();
+  const plan = allocateSchedule();
+  const ids = Object.keys(plan.conflicts || {});
+  if (!ids.length) return false;
+
+  const task = S.tasks.find(t => t.id === ids[0]);
+  if (!task) return false;
+
+  const conflict = conflictInfoForExistingTask(task);
+  if (!conflict) return false;
+
+  if (showDialog) {
+    _pendingTask = { obj: { ...task }, editingId: task.id, isEdit: true };
+    showConflictDialog(conflict, { ...task });
+  } else {
+    showOverloadToast(`${task.name}: ${Math.round(conflict.shortfall*10)/10}h cannot be scheduled. Consider extending the deadline or reducing hours.`);
+  }
+  return true;
 }
 
 /* ─── Wire invalidatePlan into clearAllocCache ───────────────── */
@@ -1287,29 +1356,18 @@ function updateDeadlineBadge() {
   const val = document.getElementById('copt-deadline').value;
   if (!val || !_conflictTask) return;
 
-  // Simulate the pending task with this candidate deadline, then ask the
-  // canonical engine how much of it would actually be allocated. This keeps
-  // the badge aligned with real task priority, events, intensity and capacity.
-  const tempId = '__deadline_preview__';
-  const previewTask = { ..._conflictTask, id: tempId, deadline: val };
-  if (!previewTask.repeat || previewTask.repeat === 'none') previewTask.date = val;
-
-  S.tasks.push(previewTask);
-  invalidatePlan();
-  const plan = allocateSchedule();
-  const allocated = Object.values(plan.allocations[tempId] || {}).reduce((s, h) => s + h, 0);
-  const shortfall = Math.round((_conflictTask.hours - allocated) * 100) / 100;
-  S.tasks = S.tasks.filter(t => t.id !== tempId);
-  invalidatePlan();
+  const testTask = { ..._conflictTask, deadline: val };
+  const { allocated } = allocationForHypotheticalTask(testTask, val);
+  const shortfall = Math.round((testTask.hours - allocated) * 10) / 10;
 
   const badge = document.getElementById('copt-deadline-badge');
   const note  = document.getElementById('copt-deadline-note');
-  if (shortfall <= 0.05) {
+  if (shortfall <= 0) {
     badge.textContent = 'fits';
     badge.className = 'copt-badge ok';
-    note.textContent = 'All ' + _conflictTask.hours + 'h can be scheduled by this date.';
+    note.textContent = 'All ' + testTask.hours + 'h can be scheduled by this date.';
   } else {
-    badge.textContent = 'still −' + Math.round(shortfall * 10) / 10 + 'h short';
+    badge.textContent = 'still −' + shortfall + 'h short';
     badge.className = 'copt-badge';
     note.textContent = 'Choose a later date to fully resolve the conflict.';
   }
@@ -1481,18 +1539,15 @@ function applyConflictResolution() {
     // Reduce hours
     task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
   } else if (selected === 3) {
-    // Overwork days — increase those days' actual capacity.
-    // This is intentionally model-level, not a visual pin: the canonical engine
-    // can then reallocate this task while still respecting events, existing
-    // tasks, mandatory/optional priority and the 24h physical cap.
-    if (!S.dayCapOverrides) S.dayCapOverrides = {};
+    // Overwork days — task-scoped only.
+    // This lets THIS task exceed normal free capacity on selected days without
+    // increasing global capacity for unrelated tasks.
+    if (!S.taskOverworkAllowances) S.taskOverworkAllowances = {};
     const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
     Object.entries(_overworkDays).forEach(([dStr, on]) => {
       if (!on || extra <= 0) return;
-      const currentCap = dailyCapacityOn(dStr);
-      const eventHrs   = eventHoursOnDay(dStr);
-      const newCap     = Math.min(24, Math.max(currentCap, currentCap + extra));
-      S.dayCapOverrides[dStr] = Math.round(newCap * 100) / 100;
+      const key = task.id + '|' + task.deadline + '|' + dStr;
+      S.taskOverworkAllowances[key] = Math.round(extra * 100) / 100;
     });
   } else if (selected === 4) {
     // Mark optional
@@ -1586,6 +1641,7 @@ function saveBaseline() {
   S.nudgeDismissed   = false;
   document.getElementById('nudge').classList.add('hidden');
   save(); render();
+  revalidateExistingTasks(true);
   showToast('Baseline saved');
 }
 
@@ -1602,13 +1658,14 @@ function saveWorkingHours() {
   const mdh = document.getElementById('settings-max-daily-hours');
   if (mdh) S.maxDailyHours = Math.max(0.5, parseFloat(mdh.value) || 8);
   save(); render();
+  revalidateExistingTasks(true);
   showToast('Working hours saved');
 }
 
 function resetData() {
   if (!confirm('Clear all tasks, events and intensity data? This cannot be undone.')) return;
   S.tasks = []; S.events = []; S.intensities = {}; S.intensityHistory = [];
-  S.taskLog = {}; S.pinnedAllocations = {}; S.dayCapOverrides = {};
+  S.taskLog = {}; S.pinnedAllocations = {}; S.dayCapOverrides = {}; S.taskOverworkAllowances = {};
   save(); render();
   showToast('Data cleared');
 }
@@ -1837,12 +1894,29 @@ function saveItem() {
     document.getElementById('modal-bg').classList.add('hidden');
     editingId = null;
     save(); render();
+    // Events reduce future capacity, so revalidate existing tasks immediately.
+    revalidateExistingTasks(true);
   }
 }
 
 let _pendingTask = null;
 
 function _commitTask(obj, eid) {
+  // Remove stale task-scoped overwork allowances if a task is edited/replaced.
+  if (eid && S.taskOverworkAllowances) {
+    Object.keys(S.taskOverworkAllowances).forEach(k => {
+      if (k.startsWith(eid + '|')) delete S.taskOverworkAllowances[k];
+    });
+  }
+
+  // Remove unsafe legacy pins when a task becomes repeating; legacy taskId|date
+  // pins cannot identify which occurrence they belong to.
+  if ((obj.repeat && obj.repeat !== 'none') && S.pinnedAllocations) {
+    Object.keys(S.pinnedAllocations).forEach(k => {
+      if (k.startsWith(obj.id + '|')) delete S.pinnedAllocations[k];
+    });
+  }
+
   if (eid) {
     const i = S.tasks.findIndex(x => x.id === eid);
     if (i >= 0) { obj.logged = S.tasks[i].logged ?? 0; S.tasks[i] = obj; }
@@ -1850,6 +1924,7 @@ function _commitTask(obj, eid) {
   } else {
     S.tasks.push(obj);
   }
+  invalidatePlan();
 }
 
 function deleteItem() {

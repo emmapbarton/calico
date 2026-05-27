@@ -37,6 +37,7 @@ const DEFAULT_STATE = {
   nudgeDismissed: false,
   taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
   lastCheckinDate: null,
+  pinnedAllocations: {}, // 'taskId|dateStr' → hours — drag/skip pinned
 };
 
 let S = { ...DEFAULT_STATE };
@@ -127,9 +128,15 @@ function allocate(task) {
   const t = today();
   if (deadline < t) return out;
 
+  const notBefore = task.notBefore ? parseDate(task.notBefore) : null;
   const days = [];
   let cur = new Date(t);
-  while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur, 1); }
+  while (cur <= deadline) {
+    const dStr = ds(cur);
+    // Skip days before notBefore date
+    if (!notBefore || cur >= notBefore) days.push(dStr);
+    cur = addDays(cur, 1);
+  }
   if (!days.length) return out;
 
   // Base remaining = estimated hours minus any explicitly logged completion
@@ -139,18 +146,33 @@ function allocate(task) {
     const [tid, dStr] = key.split('|');
     if (tid !== task.id) return;
     if (parseDate(dStr) >= today()) return; // only past days
-    // scheduled but not fully completed → add the gap back
     const gap = Math.max(0, (entry.scheduled || 0) - (entry.completed ?? entry.scheduled ?? 0));
     loggedShortfall += gap;
   });
-  const remaining = Math.max(0, task.hours - (task.logged ?? 0) + loggedShortfall);
+  const baseRemaining = Math.max(0, task.hours - (task.logged ?? 0) + loggedShortfall);
+
+  // Handle pinned allocations — remove pinned days from distribution pool
+  const pinned = {};
+  let pinnedTotal = 0;
+  days.forEach(d => {
+    const pKey = task.id + '|' + d;
+    if (S.pinnedAllocations[pKey] !== undefined) {
+      pinned[d] = Math.min(S.pinnedAllocations[pKey], freeHoursOnDay(d));
+      pinnedTotal += pinned[d];
+      out[d] = Math.round(pinned[d] * 10) / 10;
+    }
+  });
+  const unpinnedDays = days.filter(d => pinned[d] === undefined);
+  const remaining = Math.max(0, baseRemaining - pinnedTotal);
+  if (!unpinnedDays.length || remaining < 0.01) return out;
+
   const dist = effectiveDist(task);
-  const caps = days.map(d => freeHoursOnDay(d)); // max per day
+  const caps = unpinnedDays.map(d => freeHoursOnDay(d)); // max per day
 
   // Base weights from distribution preference
-  let weights = days.map((d, i) => {
+  let weights = unpinnedDays.map((d, i) => {
     if (dist === 'even')     return 1;
-    if (dist === 'front')    return days.length - i;
+    if (dist === 'front')    return unpinnedDays.length - i;
     if (dist === 'back')     return i + 1;
     if (dist === 'weighted') return Math.max(0, caps[i]);
     return 1;
@@ -158,12 +180,12 @@ function allocate(task) {
   // Zero out fully blocked days
   weights = weights.map((w, i) => caps[i] > 0 ? w : 0);
 
-  // Iterative redistribution: redistribute overflow from capped days
-  const alloc = new Array(days.length).fill(0);
-  const locked = new Array(days.length).fill(false);
+  // Iterative redistribution
+  const alloc  = new Array(unpinnedDays.length).fill(0);
+  const locked = new Array(unpinnedDays.length).fill(false);
   let toDistribute = remaining;
 
-  for (let iter = 0; iter < days.length; iter++) {
+  for (let iter = 0; iter < unpinnedDays.length; iter++) {
     const freeIdxs = weights.map((w,i) => (!locked[i] && w > 0) ? i : -1).filter(i => i >= 0);
     if (!freeIdxs.length) break;
     const wTotal = freeIdxs.reduce((s, i) => s + weights[i], 0);
@@ -185,7 +207,7 @@ function allocate(task) {
     if (toDistribute < 0.01) break;
   }
 
-  days.forEach((d, i) => {
+  unpinnedDays.forEach((d, i) => {
     if (alloc[i] > 0.01) out[d] = Math.round(alloc[i] * 10) / 10;
   });
   return out;
@@ -599,31 +621,42 @@ function renderWeek() {
   const body = document.getElementById('wk-body');
   body.innerHTML = '';
 
-  // Time gutter
+  // Time gutter — full 24 hours
   const gutter = document.createElement('div');
   gutter.className = 'wk-time-col';
   const startH = timeH(S.dayStart);
   const endH   = timeH(S.dayEnd);
-  for (let h = Math.floor(startH); h <= Math.ceil(endH); h++) {
+  const GRID_START = 0;   // always start at midnight
+  const GRID_END   = 24;  // always end at midnight
+  for (let h = GRID_START; h < GRID_END; h++) {
     const lbl = document.createElement('div');
     lbl.className = 'wk-time-slot';
-    lbl.textContent = h === 12 ? '12pm' : h > 12 ? `${h-12}pm` : `${h}am`;
+    if (h === 0)       lbl.textContent = '12am';
+    else if (h === 12) lbl.textContent = '12pm';
+    else if (h > 12)   lbl.textContent = `${h-12}pm`;
+    else               lbl.textContent = `${h}am`;
+    // Mark working hours window
+    if (h >= Math.floor(startH) && h < Math.ceil(endH)) {
+      lbl.classList.add('wk-working-hour');
+    }
     gutter.appendChild(lbl);
   }
   body.appendChild(gutter);
 
   // Day columns
-  const hoursShown = Math.ceil(endH) - Math.floor(startH);
+  const hoursShown = GRID_END - GRID_START; // always 24
   days.forEach((d, i) => {
     const dStr = ds(d);
     const isT  = dStr === todayStr;
     const isWe = i >= 5;
     const col  = document.createElement('div');
     col.className = `wk-day-col${isT?' today-col':''}${isWe?' weekend':''}`;
+    col.dataset.date = dStr;
 
-    for (let h = 0; h < hoursShown; h++) {
+    for (let h = GRID_START; h < GRID_END; h++) {
       const line = document.createElement('div');
-      line.className = 'wk-hr-line';
+      const isWorking = h >= Math.floor(startH) && h < Math.ceil(endH);
+      line.className = 'wk-hr-line' + (isWorking ? ' working' : ' non-working');
       col.appendChild(line);
     }
 
@@ -669,7 +702,8 @@ function renderWeek() {
         const available = slot.end - slotCursor;
         if (available <= 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; continue; }
         const used   = Math.min(remaining, available);
-        const topPx  = (slotCursor - startH) * 54;
+        const topPx  = (slotCursor - 0) * 54; // offset from midnight (GRID_START=0)
+        _currentRenderDStr = dStr;
         const block  = makeWeekBlock(t, 'task', startH, used, topPx);
         if (block) col.appendChild(block);
         slotCursor += used;
@@ -679,6 +713,20 @@ function renderWeek() {
     });
 
     body.appendChild(col);
+  });
+
+  // Init drag-and-drop on day columns
+  requestAnimationFrame(initWeekDragTargets);
+
+  // Auto-scroll to current time (or day start if not today's week)
+  requestAnimationFrame(() => {
+    const wkBody = document.getElementById('wk-body');
+    if (!wkBody) return;
+    const now = new Date();
+    const scrollToH = days.some(d => ds(d) === ds(today()))
+      ? now.getHours() + now.getMinutes() / 60 - 1 // 1hr before now
+      : startH; // scroll to day start for other weeks
+    wkBody.scrollTop = Math.max(0, scrollToH * 54);
   });
 }
 
@@ -694,7 +742,7 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
     const sh = timeH(item.start || '09:00');
     const eh = timeH(item.end   || '10:00');
     const dur = Math.max(eh - sh, 0.25);
-    block.style.top    = ((sh - startH) * 54) + 'px';
+    block.style.top    = ((sh - 0) * 54) + 'px'; // 0 = GRID_START (midnight)
     block.style.height = (dur * 54) + 'px';
     block.innerHTML = `<div class="wk-block-title">${item.name}</div>
       <div class="wk-block-sub">${item.start}–${item.end}</div>`;
@@ -705,7 +753,17 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
       <div class="wk-block-sub">${hours}h</div>`;
   }
 
-  block.onclick = () => openModal(type, item.id);
+  if (type === 'task') {
+    // Drag to reschedule
+    block.draggable = true;
+    block.dataset.taskId   = item.id;
+    block.dataset.sourceDs = arguments[3] !== undefined ? _currentRenderDStr : '';
+    block.dataset.hrs      = hours || 0;
+    block.addEventListener('dragstart', onTaskDragStart);
+    block.addEventListener('click', e => { if (!e._wasDrag) openModal('task', item.id); });
+  } else {
+    block.onclick = () => openModal('event', item.id);
+  }
   return block;
 }
 
@@ -883,6 +941,16 @@ function makeAgendaTaskRow(task, dStr) {
       toggleTaskLog(task, dStr, hrs);
     });
   } else {
+    // Add skip button for today and future days
+    const skipBtn = document.createElement('button');
+    skipBtn.className = 'ag-skip-btn';
+    skipBtn.textContent = 'Skip →';
+    skipBtn.title = 'Move to tomorrow';
+    skipBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      skipTaskToTomorrow(task.id, dStr);
+    });
+    el.appendChild(skipBtn);
     el.addEventListener('click', () => openModal('task', task.id));
   }
   return el;
@@ -1478,7 +1546,8 @@ function openModal(type, id) {
         document.getElementById('f-deadline').value     = item.deadline || todayVal;
         document.getElementById('f-task-start-date').value = item.date || item.deadline || todayVal;
         document.getElementById('f-hours').value        = item.hours || 4;
-        document.getElementById('f-dist').value         = item.dist  || 'inherit';
+        document.getElementById('f-dist').value         = item.dist     || 'inherit';
+        document.getElementById('f-not-before').value    = item.notBefore || '';
         document.getElementById('f-task-repeat').value  = item.repeat || 'none';
         onTaskRepeatChange();
         if (item.repeat && item.repeat !== 'none') {
@@ -1524,6 +1593,7 @@ function openModal(type, id) {
     document.getElementById('f-priority').value       = 'mandatory';
     document.getElementById('f-hours').value          = 4;
     document.getElementById('f-dist').value           = 'inherit';
+    document.getElementById('f-not-before').value    = '';
     document.getElementById('f-start').value          = '09:00';
     document.getElementById('f-end').value            = '10:00';
     document.getElementById('f-repeat').value         = 'none';
@@ -1560,7 +1630,8 @@ function saveItem() {
       deadline: document.getElementById('f-deadline').value,
       date:     document.getElementById('f-deadline').value,
       hours:    parseFloat(document.getElementById('f-hours').value) || 4,
-      dist:     document.getElementById('f-dist').value,
+      dist:       document.getElementById('f-dist').value,
+      notBefore:  document.getElementById('f-not-before').value || null,
       logged:   0,
       repeat:   repeatVal,
     };
@@ -1758,6 +1829,65 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 }
 
+
+
+/* ══════════════════════════════════════════
+   DRAG TO RESCHEDULE + SKIP
+══════════════════════════════════════════ */
+let _currentRenderDStr = '';
+let _dragTaskId   = null;
+let _dragSourceDs = null;
+let _dragHrs      = 0;
+
+function onTaskDragStart(e) {
+  _dragTaskId   = e.currentTarget.dataset.taskId;
+  _dragSourceDs = _currentRenderDStr;
+  _dragHrs      = parseFloat(e.currentTarget.dataset.hrs) || 0;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', _dragTaskId);
+  e.currentTarget._wasDrag = true;
+  setTimeout(() => { e.currentTarget._wasDrag = false; }, 200);
+}
+
+function initWeekDragTargets() {
+  document.querySelectorAll('.wk-day-col').forEach(col => {
+    col.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      col.classList.add('drag-over');
+    });
+    col.addEventListener('dragleave', () => col.classList.remove('drag-over'));
+    col.addEventListener('drop', e => {
+      e.preventDefault();
+      col.classList.remove('drag-over');
+      const targetDs = col.dataset.date;
+      if (!targetDs || !_dragTaskId || targetDs === _dragSourceDs) return;
+      pinTaskToDay(_dragTaskId, _dragSourceDs, targetDs, _dragHrs);
+    });
+  });
+}
+
+function pinTaskToDay(taskId, fromDs, toDs, hrs) {
+  if (!S.pinnedAllocations) S.pinnedAllocations = {};
+  // Remove old pin from source day
+  const fromKey = taskId + '|' + fromDs;
+  const toKey   = taskId + '|' + toDs;
+  delete S.pinnedAllocations[fromKey];
+  // Pin to new day
+  S.pinnedAllocations[toKey] = hrs;
+  clearAllocCache();
+  save(); render();
+  // Re-init drag targets after re-render
+  requestAnimationFrame(initWeekDragTargets);
+  showToast('Task moved to ' + toDs);
+}
+
+function skipTaskToTomorrow(taskId, dStr) {
+  const hrs     = taskHoursOnDay(S.tasks.find(t => t.id === taskId), dStr);
+  const tomorrow = ds(addDays(parseDate(dStr), 1));
+  pinTaskToDay(taskId, dStr, tomorrow, hrs);
+  showToast('Skipped to tomorrow');
+}
 
 /* ══════════════════════════════════════════
    DAILY CHECK-IN SYSTEM

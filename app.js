@@ -1478,7 +1478,8 @@ function saveWorkingHours() {
 
 function resetData() {
   if (!confirm('Clear all tasks, events and intensity data? This cannot be undone.')) return;
-  S.tasks = []; S.events = []; S.intensities = []; S.intensityHistory = [];
+  S.tasks = []; S.events = []; S.intensities = {}; S.intensityHistory = [];
+  S.taskLog = {}; S.pinnedAllocations = {}; S.dayCapOverrides = {};
   save(); render();
   showToast('Data cleared');
 }

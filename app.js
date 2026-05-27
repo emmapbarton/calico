@@ -757,7 +757,7 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
     block.style.top    = stackTop + 'px';
     block.style.height = (hours * 54) + 'px';
     block.innerHTML = `<div class="wk-block-title">${item.name}</div>
-      <div class="wk-block-sub">${hours}h</div>`;
+      <div class="wk-block-sub">${Math.round(hours*10)/10}h</div>`;
   }
 
   if (type === 'task') {
@@ -1350,18 +1350,21 @@ function applyConflictResolution() {
     // Reduce hours
     task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
   } else if (selected === 3) {
-    // Overwork days — directly raise maxDailyHours for selected days via a
-    // per-day override stored in S.dayCapOverrides
-    if (!S.dayCapOverrides) S.dayCapOverrides = {};
+    // Overwork days — pin the SPECIFIC TASK's extra hours to selected days
+    // This avoids affecting other tasks' allocation
+    if (!S.pinnedAllocations) S.pinnedAllocations = {};
     const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
     Object.entries(_overworkDays).forEach(([dStr, on]) => {
       if (!on) return;
-      const eventHrs  = eventHoursOnDay(dStr);
-      const taskHrs   = totalLoadOnDay(dStr); // already scheduled tasks
-      const usedHrs   = eventHrs + taskHrs;
-      // Hard cap: never exceed 24h in a day
-      const hardMax   = Math.min(24, usedHrs + (S.maxDailyHours || 6) + extra) - eventHrs;
-      S.dayCapOverrides[dStr] = Math.max(S.maxDailyHours || 6, hardMax);
+      const eventHrs = eventHoursOnDay(dStr);
+      // Current free hours on this day (what the task would normally get)
+      const normalFree = freeHoursOnDay(dStr);
+      // Extra hours = user-specified, but never exceed 24h total in the day
+      const maxExtra = Math.max(0, Math.min(extra, 24 - eventHrs - normalFree));
+      const pinnedHrs = Math.round((normalFree + maxExtra) * 10) / 10;
+      if (pinnedHrs > 0) {
+        S.pinnedAllocations[task.id + '|' + dStr] = pinnedHrs;
+      }
     });
   } else if (selected === 4) {
     // Mark optional

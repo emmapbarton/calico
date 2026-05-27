@@ -26,7 +26,7 @@ const DEFAULT_STATE = {
   distribution: 'even',
   dayStart: '09:00',
   dayEnd: '18:00',
-  maxDailyHours: 6,
+  maxDailyHours: 8,
   dayCapOverrides: {},
   view: 'week',
   weekOffset: 0,
@@ -404,10 +404,11 @@ function eventHoursOnDay(dateStr) {
 
 function dailyCapacity(dateStr) {
   // Raw max task hours scaled by intensity (before event blocking)
-  // Per-day overrides (from overwork days) take precedence
-  const max   = (S.dayCapOverrides && S.dayCapOverrides[dateStr]) || S.maxDailyHours || 6;
-  const ratio = getInt(dateStr) / (S.baseline || 7);
-  return Math.round(Math.min(max, max * ratio) * 10) / 10;
+  // maxDailyHours is set by the user in Settings — independent of working window
+  const override = S.dayCapOverrides && S.dayCapOverrides[dateStr];
+  const base     = override || S.maxDailyHours || 8;
+  const ratio    = getInt(dateStr) / (S.baseline || 7);
+  return Math.round(Math.min(base, base * ratio) * 10) / 10;
 }
 
 function freeHoursOnDay(dateStr) {
@@ -1016,38 +1017,43 @@ function earliestFittingDeadline(taskHours, fromDeadline) {
   return null;
 }
 
-// Compute total free hours in window, excluding one task's contribution.
-// Uses raw capacity - events, not view-dependent taskHoursOnDay.
+// Compute total free hours available for a task in its window.
+// "Free" = capacity - event hours, summed across all days today → deadline.
+// We subtract the raw hours of other mandatory tasks that share the window,
+// but only up to each day's free capacity (no double-counting).
 function freeHoursExcluding(deadline, excludeTaskId) {
   const t = today();
   const end = parseDate(deadline);
   if (end < t) return 0;
 
-  // Sum of all free hours across the window
-  let totalFree = 0, cur = new Date(t);
+  let available = 0;
+  let cur = new Date(t);
   while (cur <= end) {
-    totalFree += freeHoursOnDay(ds(cur));
+    const dStr = ds(cur);
+    const dayFree = freeHoursOnDay(dStr);
+
+    // How much of this day's free time is already committed to other mandatory tasks?
+    let committed = 0;
+    S.tasks.forEach(otherTask => {
+      if (otherTask.id === excludeTaskId) return;
+      if (otherTask.priority === 'optional') return;
+      if (!otherTask.deadline) return;
+      // Only count tasks whose window includes this day
+      const otherEnd = parseDate(otherTask.deadline);
+      const otherStart = otherTask.notBefore ? parseDate(otherTask.notBefore) : t;
+      if (cur < otherStart || cur > otherEnd) return;
+      // Pro-rate: each task gets a fair share of the day proportional to its hours
+      // vs total hours of all competing tasks. This avoids recursive allocate() calls.
+      const daysInWindow = Math.max(1, Math.round((otherEnd - otherStart) / 86400000) + 1);
+      const dailyShare   = Math.min(dayFree, otherTask.hours / daysInWindow);
+      committed += dailyShare;
+    });
+
+    available += Math.max(0, dayFree - committed);
     cur = addDays(cur, 1);
   }
 
-  // Subtract hours already committed to OTHER tasks in the same window
-  // so we don't double-book. Exclude the task being saved.
-  let committed = 0;
-  S.tasks.forEach(t => {
-    if (t.id === excludeTaskId) return;     // skip the task being saved
-    if (t.priority === 'optional') return;  // optional tasks don't block mandatory
-    // Sum what this task uses in the window
-    let taskCur = new Date(today());
-    while (taskCur <= end) {
-      const dStr = ds(taskCur);
-      // Use allocate directly to get view-independent allocation
-      const alloc = allocate(t);
-      committed += alloc[dStr] ?? 0;
-      taskCur = addDays(taskCur, 1);
-    }
-  });
-
-  return Math.max(0, Math.round((totalFree - committed) * 10) / 10);
+  return Math.max(0, Math.round(available * 10) / 10);
 }
 
 function computeConflict(taskObj) {
@@ -1445,7 +1451,7 @@ function renderSettings() {
 
   // Sync max daily hours
   const mdh = document.getElementById('settings-max-daily-hours');
-  if (mdh) mdh.value = S.maxDailyHours || 6;
+  if (mdh) mdh.value = S.maxDailyHours || 8;
 }
 
 function saveBaseline() {
@@ -1467,8 +1473,8 @@ function saveDist() {
 function saveWorkingHours() {
   S.dayStart = document.getElementById('settings-day-start').value;
   S.dayEnd   = document.getElementById('settings-day-end').value;
-  const mdh  = document.getElementById('settings-max-daily-hours');
-  if (mdh) S.maxDailyHours = Math.max(1, parseFloat(mdh.value) || 6);
+  const mdh = document.getElementById('settings-max-daily-hours');
+  if (mdh) S.maxDailyHours = Math.max(0.5, parseFloat(mdh.value) || 8);
   save(); render();
   showToast('Working hours saved');
 }

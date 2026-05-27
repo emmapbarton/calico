@@ -482,6 +482,31 @@
   </div>
 </div>
 
+
+<!-- DAILY CHECK-IN MODAL -->
+<div id="checkin-bg" class="modal-bg hidden">
+  <div class="modal checkin-modal" onclick="event.stopPropagation()">
+    <div class="checkin-head">
+      <div>
+        <div class="checkin-eyebrow">Morning check-in</div>
+        <div class="checkin-title">How did yesterday go?</div>
+      </div>
+      <button class="modal-x" onclick="dismissCheckin()">✕</button>
+    </div>
+    <div class="checkin-body">
+      <div class="checkin-date" id="checkin-date"></div>
+      <div id="checkin-tasks"></div>
+    </div>
+    <div class="checkin-footer">
+      <span class="checkin-note">Unchecked time will be redistributed to future days</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn-ghost" onclick="remindCheckinLater()">Remind later</button>
+        <button class="btn-primary" onclick="submitCheckin()">Done →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

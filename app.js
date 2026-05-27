@@ -523,7 +523,6 @@ let _masterAlloc = null; // {taskId: {dateStr: hours}}
 let _masterAllocKey = ''; // cache key
 
 function getMasterAlloc() {
-  // Build a cache key from tasks + intensities + events + settings
   const key = JSON.stringify({
     tasks: S.tasks.map(t => ({id:t.id,hours:t.hours,deadline:t.deadline,priority:t.priority,dist:t.dist,notBefore:t.notBefore,pinned:S.pinnedAllocations})),
     baseline: S.baseline, maxDailyHours: S.maxDailyHours,
@@ -531,23 +530,52 @@ function getMasterAlloc() {
   });
   if (_masterAlloc && _masterAllocKey === key) return _masterAlloc;
 
-  // Allocate all tasks in priority order: mandatory first, then optional
-  const sorted = [...S.tasks].sort((a, b) => {
-    if (a.priority === b.priority) return 0;
-    return a.priority === 'mandatory' ? -1 : 1;
+  // Step 1: compute each task's ideal allocation ignoring other tasks
+  const result = {};
+  S.tasks.forEach(task => {
+    result[task.id] = allocateWithConsumed(task, {});
   });
 
-  // Track consumed hours per day across all tasks
-  const consumed = {}; // dateStr → hours consumed
-  const result   = {}; // taskId → {dateStr → hours}
+  // Step 2: for each day, find total demand vs supply and scale proportionally
+  // Mandatory tasks get full share first; optional tasks share what's left
+  const allDays = new Set();
+  Object.values(result).forEach(alloc => Object.keys(alloc).forEach(d => allDays.add(d)));
 
-  sorted.forEach(task => {
-    // Temporarily override freeHoursOnDay to use consumed hours
-    const alloc = allocateWithConsumed(task, consumed);
-    result[task.id] = alloc;
-    // Mark those hours as consumed
-    Object.entries(alloc).forEach(([d, h]) => {
-      consumed[d] = (consumed[d] || 0) + h;
+  allDays.forEach(d => {
+    const supply = freeHoursOnDay(d, 0); // total free hours on this day
+
+    // Mandatory tasks
+    const mandatoryTasks = S.tasks.filter(t => t.priority !== 'optional' && result[t.id][d] > 0);
+    const mandatoryDemand = mandatoryTasks.reduce((s, t) => s + result[t.id][d], 0);
+
+    if (mandatoryDemand > supply) {
+      // Scale mandatory tasks down proportionally
+      const scale = supply / mandatoryDemand;
+      mandatoryTasks.forEach(t => {
+        result[t.id][d] = Math.round(result[t.id][d] * scale * 10) / 10;
+      });
+      // Optional tasks get nothing
+      S.tasks.filter(t => t.priority === 'optional' && result[t.id][d] > 0).forEach(t => {
+        result[t.id][d] = 0;
+      });
+    } else {
+      // Mandatory tasks fit — give optional tasks what's left
+      const leftover = supply - mandatoryDemand;
+      const optionalTasks = S.tasks.filter(t => t.priority === 'optional' && result[t.id][d] > 0);
+      const optionalDemand = optionalTasks.reduce((s, t) => s + result[t.id][d], 0);
+      if (optionalDemand > leftover && optionalDemand > 0) {
+        const scale = leftover / optionalDemand;
+        optionalTasks.forEach(t => {
+          result[t.id][d] = Math.round(result[t.id][d] * scale * 10) / 10;
+        });
+      }
+    }
+  });
+
+  // Step 3: clean up zero entries
+  Object.keys(result).forEach(id => {
+    Object.keys(result[id]).forEach(d => {
+      if (result[id][d] < 0.01) delete result[id][d];
     });
   });
 
@@ -1159,34 +1187,29 @@ function earliestFittingDeadline(taskHours, fromDeadline) {
   return null;
 }
 
-// Compute total free hours available for a task in its window.
-// "Free" = capacity - event hours, summed across all days today → deadline.
-// We subtract the raw hours of other mandatory tasks that share the window,
-// but only up to each day's free capacity (no double-counting).
+// Compute total free hours available for a new task in its window.
+// Uses the master allocation to know what other tasks have actually consumed.
+// excludeTaskId: the task being saved (don't count its own allocation).
 function freeHoursExcluding(deadline, excludeTaskId) {
   const todayDate = today();
   const end = parseDate(deadline);
   if (end < todayDate) return 0;
 
+  // Get current master alloc (reflects what existing tasks actually use)
+  const master = getMasterAlloc();
+
   let available = 0;
   let cur = new Date(todayDate);
   while (cur <= end) {
     const dStr    = ds(cur);
-    const dayFree = freeHoursOnDay(dStr);
+    const dayFree = freeHoursOnDay(dStr, 0);
 
-    // Subtract hours committed to other mandatory tasks on this day
+    // Sum what other mandatory tasks actually consume on this day
     let committed = 0;
-    S.tasks.forEach(otherTask => {
-      if (otherTask.id === excludeTaskId) return;
-      if (otherTask.priority === 'optional') return;
-      if (!otherTask.deadline) return;
-      const otherEnd   = parseDate(otherTask.deadline);
-      // Use todayDate (not shadowed 't') as the window start
-      const otherStart = otherTask.notBefore ? parseDate(otherTask.notBefore) : todayDate;
-      if (cur < otherStart || cur > otherEnd) return;
-      const daysInWindow = Math.max(1, Math.round((otherEnd.getTime() - otherStart.getTime()) / 86400000) + 1);
-      const dailyShare   = Math.min(dayFree, otherTask.hours / daysInWindow);
-      committed += dailyShare;
+    S.tasks.forEach(t => {
+      if (t.id === excludeTaskId) return;
+      if (t.priority === 'optional') return;
+      committed += (master[t.id] && master[t.id][dStr]) || 0;
     });
 
     available += Math.max(0, dayFree - committed);

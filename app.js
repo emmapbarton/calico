@@ -35,6 +35,8 @@ const DEFAULT_STATE = {
   intensities: {},       // dateStr → 1‥10
   intensityHistory: [],  // [{date, dir}]
   nudgeDismissed: false,
+  taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
+  lastCheckinDate: null,
 };
 
 let S = { ...DEFAULT_STATE };
@@ -130,7 +132,18 @@ function allocate(task) {
   while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur, 1); }
   if (!days.length) return out;
 
-  const remaining = Math.max(0, task.hours - (task.logged ?? 0));
+  // Base remaining = estimated hours minus any explicitly logged completion
+  // Also add back any hours from past days that were scheduled but not completed
+  let loggedShortfall = 0;
+  Object.entries(S.taskLog).forEach(([key, entry]) => {
+    const [tid, dStr] = key.split('|');
+    if (tid !== task.id) return;
+    if (parseDate(dStr) >= today()) return; // only past days
+    // scheduled but not fully completed → add the gap back
+    const gap = Math.max(0, (entry.scheduled || 0) - (entry.completed ?? entry.scheduled ?? 0));
+    loggedShortfall += gap;
+  });
+  const remaining = Math.max(0, task.hours - (task.logged ?? 0) + loggedShortfall);
   const dist = effectiveDist(task);
   const caps = days.map(d => freeHoursOnDay(d)); // max per day
 
@@ -264,7 +277,15 @@ function allocateOccurrence(task, windowStart, deadlineStr) {
   while (cur <= deadline) { days.push(ds(cur)); cur = addDays(cur, 1); }
   if (!days.length) return out;
 
-  const hours = task.hours || 1;
+  // Add unfinished hours from past occurrences back into this occurrence's pool
+  let occShortfall = 0;
+  Object.entries(S.taskLog).forEach(([key, entry]) => {
+    const [tid, dStr] = key.split('|');
+    if (tid !== task.id) return;
+    if (parseDate(dStr) >= today()) return;
+    occShortfall += Math.max(0, (entry.scheduled || 0) - (entry.completed ?? entry.scheduled ?? 0));
+  });
+  const hours = (task.hours || 1) + occShortfall;
   const dist  = effectiveDist(task);
   const caps  = days.map(d => freeHoursOnDay(d));
 
@@ -700,6 +721,7 @@ function renderAgenda() {
   days.forEach((d, i) => {
     const dStr   = ds(d);
     const isT    = dStr === todayStr;
+    const isPast = parseDate(dStr) < today() && !isT;
     const val    = getInt(dStr);
     const load   = totalLoadOnDay(dStr);
     const cap    = dailyCapacity(dStr);
@@ -769,6 +791,24 @@ function renderAgenda() {
       dayEl.appendChild(empty);
     }
 
+    // Redistribution notice for past days with missed tasks
+    if (isPast && tasks.length) {
+      const missed = tasks.filter(t => {
+        const key = t.id + '|' + dStr;
+        const e = S.taskLog[key];
+        return !e || !e.checked;
+      });
+      if (missed.length) {
+        const notice = document.createElement('div');
+        notice.className = 'ag-redist-notice';
+        const hrs = missed.reduce((sum, t) => sum + taskHoursOnDay(t, dStr), 0);
+        const names = missed.map(t => t.name).join(', ');
+        notice.innerHTML = `<span class="ag-redist-icon">↻</span>
+          <span>${Math.round(hrs*10)/10}h from <strong>${names}</strong> redistributed to future days</span>`;
+        dayEl.appendChild(notice);
+      }
+    }
+
     // Intensity slider
     const slider = dayEl.querySelector('.ag-int-slider');
     updateSliderFill(slider);
@@ -794,34 +834,72 @@ function repeatLabel(ev) {
 
 function makeAgendaTaskRow(task, dStr) {
   const el = document.createElement('div');
-  el.className = `ag-task-row${task.priority==='optional'?' optional':''}`;
+  const isPast = parseDate(dStr) < today();
+  const logKey = task.id + '|' + dStr;
+  const logEntry = S.taskLog[logKey];
+  const isDone   = logEntry && logEntry.checked;
+  const isMissed = isPast && !isDone;
+
+  el.className = `ag-task-row${task.priority==='optional'?' optional':''}${isDone?' completed':''}${isMissed?' missed':''}`;
   const color = task.color || '#111';
   el.style.setProperty('--task-color', color);
 
   const hrs = taskHoursOnDay(task, dStr);
   const avg = task.hours / Math.max(1, daysRemaining(task));
   let redistBadge = '';
-  if (hrs < avg * 0.85) redistBadge = `<span class="badge badge-reduced">↓ reduced</span>`;
-  else if (hrs > avg * 1.15) redistBadge = `<span class="badge badge-extra">↑ extra</span>`;
+  if (!isPast) {
+    if (hrs < avg * 0.85) redistBadge = `<span class="badge badge-reduced">↓ reduced</span>`;
+    else if (hrs > avg * 1.15) redistBadge = `<span class="badge badge-extra">↑ extra</span>`;
+  }
 
-  const taskRl   = repeatLabel(task);
-  const priBadge = task.priority === 'optional'
-    ? `<span class="badge badge-opt">optional</span>` : '';
-  const mandBadge = task.priority === 'mandatory'
-    ? `<span class="badge">mandatory</span>` : '';
+  const taskRl    = repeatLabel(task);
+  const priBadge  = task.priority === 'optional' ? `<span class="badge badge-opt">optional</span>` : '';
+  const mandBadge = task.priority === 'mandatory' ? `<span class="badge">mandatory</span>` : '';
+  const statusBadge = isDone
+    ? `<span class="badge badge-done">done</span>`
+    : isMissed ? `<span class="badge badge-missed">missed</span>` : '';
+
+  const hrsDisplay = isDone
+    ? `<div class="ag-task-hrs crossed">${hrs}h</div>`
+    : `<div class="ag-task-hrs">${hrs}h</div>`;
+
+  const checkbox = isPast
+    ? `<div class="ag-task-check">${isDone ? '✓' : ''}</div>`
+    : '';
 
   el.innerHTML = `
+    ${checkbox}
     <div class="ag-task-accent"></div>
     <div class="ag-task-name">${task.name}</div>
     <div class="ag-task-badges">
-      ${mandBadge}${priBadge}
-      ${redistBadge}
+      ${mandBadge}${priBadge}${statusBadge}${redistBadge}
       ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
     </div>
-    <div class="ag-task-hrs">${hrs}h</div>`;
+    ${hrsDisplay}`;
 
-  el.addEventListener('click', () => openModal('task', task.id));
+  if (isPast) {
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleTaskLog(task, dStr, hrs);
+    });
+  } else {
+    el.addEventListener('click', () => openModal('task', task.id));
+  }
   return el;
+}
+
+function toggleTaskLog(task, dStr, scheduledHrs) {
+  const key = task.id + '|' + dStr;
+  const entry = S.taskLog[key];
+  if (!entry || !entry.checked) {
+    // Mark as done — fully completed
+    S.taskLog[key] = { scheduled: scheduledHrs, completed: scheduledHrs, checked: true };
+  } else {
+    // Uncheck — mark as missed (0 completed)
+    S.taskLog[key] = { scheduled: scheduledHrs, completed: 0, checked: false };
+  }
+  clearAllocCache();
+  save(); render();
 }
 
 function makeAgendaEntry(item, type, dStr) {
@@ -1680,6 +1758,153 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2,6);
 }
 
+
+/* ══════════════════════════════════════════
+   DAILY CHECK-IN SYSTEM
+══════════════════════════════════════════ */
+
+function maybeShowCheckin() {
+  // Find tasks scheduled for yesterday that haven't been checked
+  const yesterday = ds(addDays(today(), -1));
+  const unchecked = [];
+
+  S.tasks.forEach(t => {
+    const hrs = (() => {
+      // Temporarily set visible days to include yesterday for allocation
+      const saved = _visibleDays.slice();
+      if (!_visibleDays.includes(yesterday)) {
+        _visibleDays = [yesterday];
+        clearAllocCache();
+      }
+      const h = taskHoursOnDay(t, yesterday);
+      _visibleDays = saved;
+      clearAllocCache();
+      return h;
+    })();
+
+    if (hrs <= 0) return;
+    const key = t.id + '|' + yesterday;
+    const entry = S.taskLog[key];
+    if (!entry || !entry.checked) {
+      unchecked.push({ task: t, hrs, key, entry });
+    }
+  });
+
+  if (!unchecked.length) return; // nothing to check in about
+
+  // Build modal content
+  const d = parseDate(yesterday);
+  const dayLabel = d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  document.getElementById('checkin-date').textContent =
+    dayLabel.toUpperCase() + ' — ' + unchecked.length + ' task' + (unchecked.length !== 1 ? 's' : '') + ' scheduled';
+
+  const container = document.getElementById('checkin-tasks');
+  container.innerHTML = '';
+
+  unchecked.forEach(({ task, hrs, key, entry }) => {
+    const alreadyPartial = entry && !entry.checked;
+    const completed = entry ? (entry.completed ?? 0) : 0;
+
+    const item = document.createElement('div');
+    item.className = 'checkin-task-item';
+    item.dataset.key = key;
+    item.dataset.scheduled = hrs;
+    item.dataset.completed = completed;
+    item.innerHTML = `
+      <div class="ci-row">
+        <div class="ci-check" onclick="toggleCheckinItem(this)">${completed >= hrs ? '✓' : ''}</div>
+        <div class="ci-accent" style="background:${task.color||'#111'}"></div>
+        <div class="ci-name">${task.name}</div>
+        <div class="ci-scheduled">${hrs}h scheduled</div>
+      </div>
+      <div class="ci-partial ${completed >= hrs ? 'hidden' : ''}">
+        <span>How much did you complete?</span>
+        <input type="number" class="ci-partial-input" value="${completed}" min="0" max="${hrs}" step="0.5"
+          oninput="onPartialInput(this)">
+        <span>h</span>
+        <span class="ci-redist-note" id="ci-note-${key.replace('|','-')}"></span>
+      </div>`;
+
+    if (completed >= hrs) {
+      item.querySelector('.ci-check').classList.add('checked');
+      item.querySelector('.ci-row').classList.add('done');
+    }
+    updatePartialNote(item.querySelector('.ci-partial-input'), hrs);
+    container.appendChild(item);
+  });
+
+  document.getElementById('checkin-bg').classList.remove('hidden');
+}
+
+function toggleCheckinItem(checkEl) {
+  const row   = checkEl.closest('.checkin-task-item');
+  const hrs   = parseFloat(row.dataset.scheduled);
+  const isNowChecked = !checkEl.classList.contains('checked');
+
+  checkEl.classList.toggle('checked', isNowChecked);
+  checkEl.textContent = isNowChecked ? '✓' : '';
+  row.querySelector('.ci-row').classList.toggle('done', isNowChecked);
+  row.dataset.completed = isNowChecked ? hrs : 0;
+
+  const partial = row.querySelector('.ci-partial');
+  partial.classList.toggle('hidden', isNowChecked);
+  if (!isNowChecked) {
+    const inp = partial.querySelector('.ci-partial-input');
+    inp.value = 0;
+    updatePartialNote(inp, hrs);
+  }
+}
+
+function onPartialInput(inp) {
+  const row = inp.closest('.checkin-task-item');
+  const hrs = parseFloat(row.dataset.scheduled);
+  const val = Math.min(hrs, Math.max(0, parseFloat(inp.value) || 0));
+  row.dataset.completed = val;
+  updatePartialNote(inp, hrs);
+}
+
+function updatePartialNote(inp, scheduledHrs) {
+  const val  = parseFloat(inp.value) || 0;
+  const gap  = Math.round((scheduledHrs - val) * 10) / 10;
+  const row  = inp.closest('.checkin-task-item');
+  const key  = row.dataset.key;
+  const note = document.getElementById('ci-note-' + key.replace('|', '-'));
+  if (!note) return;
+  note.textContent = gap > 0 ? `→ ${gap}h will be redistributed` : '→ fully done';
+  note.style.color = gap > 0 ? 'var(--accent)' : '#1e6641';
+}
+
+function submitCheckin() {
+  const todayStr = ds(today());
+  const yesterday = ds(addDays(today(), -1));
+
+  document.querySelectorAll('.checkin-task-item').forEach(item => {
+    const key       = item.dataset.key;
+    const scheduled = parseFloat(item.dataset.scheduled);
+    const completed = parseFloat(item.dataset.completed);
+    const checked   = item.querySelector('.ci-check').classList.contains('checked') || completed >= scheduled;
+    S.taskLog[key]  = { scheduled, completed: checked ? scheduled : completed, checked };
+  });
+
+  S.lastCheckinDate = todayStr;
+  clearAllocCache();
+  document.getElementById('checkin-bg').classList.add('hidden');
+  save(); render();
+  showToast('Check-in saved');
+}
+
+function dismissCheckin() {
+  // Mark as seen today so it doesn't re-prompt until tomorrow
+  S.lastCheckinDate = ds(today());
+  document.getElementById('checkin-bg').classList.add('hidden');
+  save();
+}
+
+function remindCheckinLater() {
+  // Don't mark as seen — will re-prompt on next page load today
+  document.getElementById('checkin-bg').classList.add('hidden');
+}
+
 /* ══════════════════════════════════════════
    BOOT
 ══════════════════════════════════════════ */
@@ -1688,9 +1913,14 @@ load();
 if (S.onboarded) {
   document.getElementById('onboarding').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
+  render();
+  // Show check-in prompt once per day if there are unchecked past tasks
+  const todayStr = ds(today());
+  if (S.lastCheckinDate !== todayStr) {
+    maybeShowCheckin();
+  }
 } else {
   document.getElementById('onboarding').classList.remove('hidden');
   document.getElementById('app').classList.add('hidden');
+  render();
 }
-
-render();

@@ -199,7 +199,7 @@ function allocate(task) {
         locked[i] = true;
         overflow += raw - caps[i];
       } else {
-        alloc[i] = raw;
+        alloc[i] += raw; // accumulate across iterations, not overwrite
       }
     });
 
@@ -333,7 +333,7 @@ function allocateOccurrence(task, windowStart, deadlineStr) {
     freeIdxs.forEach(i => {
       const raw = (weights[i] / wTotal) * toDistribute;
       if (raw >= caps[i]) { alloc[i] = caps[i]; locked[i] = true; overflow += raw - caps[i]; }
-      else { alloc[i] = raw; }
+      else { alloc[i] += raw; } // accumulate across iterations
     });
     toDistribute = overflow;
     if (toDistribute < 0.01) break;

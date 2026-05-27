@@ -984,10 +984,10 @@ function makeAgendaEntry(item, type, dStr) {
 
 // Compute total free hours across a task's window (today → deadline)
 function totalFreeHoursInWindow(deadline) {
-  const t = today();
+  const todayDate = today();
   const end = parseDate(deadline);
-  if (end < t) return 0;
-  let total = 0, cur = new Date(t);
+  if (end < todayDate) return 0;
+  let total = 0, cur = new Date(todayDate);
   while (cur <= end) {
     total += freeHoursOnDay(ds(cur));
     cur = addDays(cur, 1);
@@ -997,18 +997,17 @@ function totalFreeHoursInWindow(deadline) {
 
 // Count free days in window
 function freeDaysInWindow(deadline) {
-  const t = today();
+  const todayDate = today();
   const end = parseDate(deadline);
-  let n = 0, cur = new Date(t);
+  let n = 0, cur = new Date(todayDate);
   while (cur <= end) { if (freeHoursOnDay(ds(cur)) > 0) n++; cur = addDays(cur, 1); }
   return n;
 }
 
 // Find earliest deadline where taskHours fits
 function earliestFittingDeadline(taskHours, fromDeadline) {
-  const t = today();
-  let cumFree = 0, cur = new Date(t);
-  // Walk up to 2 years forward
+  const todayDate = today();
+  let cumFree = 0, cur = new Date(todayDate);
   for (let i = 0; i < 730; i++) {
     cumFree += freeHoursOnDay(ds(cur));
     if (cumFree >= taskHours) return ds(cur);
@@ -1022,29 +1021,27 @@ function earliestFittingDeadline(taskHours, fromDeadline) {
 // We subtract the raw hours of other mandatory tasks that share the window,
 // but only up to each day's free capacity (no double-counting).
 function freeHoursExcluding(deadline, excludeTaskId) {
-  const t = today();
+  const todayDate = today();
   const end = parseDate(deadline);
-  if (end < t) return 0;
+  if (end < todayDate) return 0;
 
   let available = 0;
-  let cur = new Date(t);
+  let cur = new Date(todayDate);
   while (cur <= end) {
-    const dStr = ds(cur);
+    const dStr    = ds(cur);
     const dayFree = freeHoursOnDay(dStr);
 
-    // How much of this day's free time is already committed to other mandatory tasks?
+    // Subtract hours committed to other mandatory tasks on this day
     let committed = 0;
     S.tasks.forEach(otherTask => {
       if (otherTask.id === excludeTaskId) return;
       if (otherTask.priority === 'optional') return;
       if (!otherTask.deadline) return;
-      // Only count tasks whose window includes this day
-      const otherEnd = parseDate(otherTask.deadline);
-      const otherStart = otherTask.notBefore ? parseDate(otherTask.notBefore) : t;
+      const otherEnd   = parseDate(otherTask.deadline);
+      // Use todayDate (not shadowed 't') as the window start
+      const otherStart = otherTask.notBefore ? parseDate(otherTask.notBefore) : todayDate;
       if (cur < otherStart || cur > otherEnd) return;
-      // Pro-rate: each task gets a fair share of the day proportional to its hours
-      // vs total hours of all competing tasks. This avoids recursive allocate() calls.
-      const daysInWindow = Math.max(1, Math.round((otherEnd - otherStart) / 86400000) + 1);
+      const daysInWindow = Math.max(1, Math.round((otherEnd.getTime() - otherStart.getTime()) / 86400000) + 1);
       const dailyShare   = Math.min(dayFree, otherTask.hours / daysInWindow);
       committed += dailyShare;
     });

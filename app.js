@@ -267,6 +267,8 @@ function expandTaskOccurrences(tasks, days) {
               priority:    task.priority || 'mandatory',
               dist:        task.dist === 'inherit' ? S.distribution : (task.dist || 'even'),
               notBefore:   task.notBefore || null,
+              repeat:      task.repeat,
+              repeatDays:  task.repeatDays || [],
               color:       task.color,
               name:        task.name,
             });
@@ -324,6 +326,19 @@ function engineRepeatOccursOn(task, dateStr) {
     return diff >= 0 && diff % (task.repeatInterval || 7) === 0;
   }
   return false;
+}
+
+function occurrenceCanAllocateOn(occ, dateStr) {
+  const dow = parseDate(dateStr).getDay();
+
+  // Daily and weekly tasks may use the whole window between occurrences. For
+  // weekday/weekend/custom repeats, keep each occurrence on days that match the
+  // repeat pattern so weekday work does not spill onto weekends.
+  if (occ.repeat === 'weekdays') return dow >= 1 && dow <= 5;
+  if (occ.repeat === 'weekends') return dow === 0 || dow === 6;
+  if (occ.repeat === 'custom') return (occ.repeatDays || []).includes(dow);
+
+  return true;
 }
 
 /* ─── Event occurrence helpers ────────────────────────────────
@@ -449,7 +464,7 @@ function getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays) {
   while (cur <= deadline) {
     const dStr = ds(cur);
     const effectiveCap = (remainingCapacity[dStr] || 0) + (extraRemaining[dStr] || 0);
-    if (!excludedDays?.has(dStr) && effectiveCap > 0.001) {
+    if (!excludedDays?.has(dStr) && occurrenceCanAllocateOn(occ, dStr) && effectiveCap > 0.001) {
       days.push({ date: dStr, free: effectiveCap });
     }
     cur = addDays(cur, 1);
@@ -512,30 +527,40 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
     let cur = new Date(winStart);
     while (cur <= deadline) {
       const dStr = ds(cur);
-      extraRemaining[dStr] = taskScopedOverworkFor(occ, dStr);
+      if (occurrenceCanAllocateOn(occ, dStr)) {
+        extraRemaining[dStr] = taskScopedOverworkFor(occ, dStr);
+      }
       cur = addDays(cur, 1);
     }
   }
 
   let remaining = Math.max(0, +occ.hours || 0);
+  let pinnedUnfilled = 0;
 
-  getEligibleDays(occ, remainingCapacity, extraRemaining).forEach(day => {
-    const pinnedH = pinnedHoursForOccurrence(occ, day.date);
-    if (pinnedH === undefined || remaining <= ALLOC_PROGRESS_EPSILON) return;
+  if (deadline >= todayDate) {
+    let cur = new Date(winStart);
+    while (cur <= deadline && remaining > ALLOC_PROGRESS_EPSILON) {
+      const dStr = ds(cur);
+      const pinnedH = pinnedHoursForOccurrence(occ, dStr);
+      if (pinnedH === undefined) {
+        cur = addDays(cur, 1);
+        continue;
+      }
 
-    const used = consumeCapacityForOccurrence(
-      occ,
-      day.date,
-      Math.min(+pinnedH || 0, remaining),
-      remainingCapacity,
-      extraRemaining
-    );
-    if (used > 0.001) {
-      allocation[day.date] = (allocation[day.date] || 0) + used;
-      remaining -= used;
-      excludedDays.add(day.date);
+      const requested = Math.min(+pinnedH || 0, remaining);
+      const used = occurrenceCanAllocateOn(occ, dStr)
+        ? consumeCapacityForOccurrence(occ, dStr, requested, remainingCapacity, extraRemaining)
+        : 0;
+
+      if (used > 0.001) {
+        allocation[dStr] = (allocation[dStr] || 0) + used;
+      }
+      remaining -= requested;
+      pinnedUnfilled += Math.max(0, requested - used);
+      excludedDays.add(dStr);
+      cur = addDays(cur, 1);
     }
-  });
+  }
 
   let guard = 0;
   while (remaining > ALLOC_EPSILON && guard++ < 1000) {
@@ -574,6 +599,8 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
   }
 
   if (remaining <= ALLOC_EPSILON) remaining = 0;
+  remaining += pinnedUnfilled;
+  if (remaining <= ALLOC_EPSILON) remaining = 0;
   const allocated = (+occ.hours || 0) - remaining;
 
   return {
@@ -601,11 +628,13 @@ function batchCapacityForOccurrences(batch, remainingCapacity) {
     let cur = new Date(winStart);
     while (cur <= deadline) {
       const dStr = ds(cur);
-      if ((remainingCapacity[dStr] || 0) > 0.001) normalDays.add(dStr);
-      const extra = taskScopedOverworkFor(occ, dStr);
-      if (extra > 0.001) {
-        extraRemaining[dStr] = extra;
-        taskScopedExtra += extra;
+      if (occurrenceCanAllocateOn(occ, dStr)) {
+        if ((remainingCapacity[dStr] || 0) > 0.001) normalDays.add(dStr);
+        const extra = taskScopedOverworkFor(occ, dStr);
+        if (extra > 0.001) {
+          extraRemaining[dStr] = extra;
+          taskScopedExtra += extra;
+        }
       }
       cur = addDays(cur, 1);
     }

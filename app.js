@@ -395,96 +395,156 @@ function pinnedHoursForOccurrence(occ, dateStr) {
 }
 
 /* ─── Step 4: Allocate each occurrence ──────────────────────── */
-function allocateOccurrence(occ, remainingCapacity) {
-  // Place occ.hours across occ.windowStart → occ.deadline.
-  // Uses normal remainingCapacity first, then task-scoped overwork allowance.
-  // Overwork never increases global capacity for other tasks.
-  const out = {};
+const ALLOC_EPSILON = 0.05;
+const ALLOC_PROGRESS_EPSILON = 0.01;
+
+function roundHours(n) {
+  return Math.round((+n || 0) * 100) / 100;
+}
+
+function consumeCapacityForOccurrence(occ, dateStr, hours, remainingCapacity, extraRemaining) {
+  const h = Math.max(0, +hours || 0);
+  if (h <= 0) return 0;
+
+  const normalUse = Math.min(remainingCapacity[dateStr] || 0, h);
+  remainingCapacity[dateStr] = Math.max(0, (remainingCapacity[dateStr] || 0) - normalUse);
+
+  const extraUse = Math.min(extraRemaining[dateStr] || 0, h - normalUse);
+  extraRemaining[dateStr] = Math.max(0, (extraRemaining[dateStr] || 0) - extraUse);
+
+  return normalUse + extraUse;
+}
+
+function getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays) {
   const todayDate = today();
   const deadline  = parseDate(occ.deadline);
   const winStart  = occ.notBefore
     ? (parseDate(occ.notBefore) > todayDate ? parseDate(occ.notBefore) : todayDate)
     : (parseDate(occ.windowStart) > todayDate ? parseDate(occ.windowStart) : todayDate);
 
-  if (deadline < todayDate) return out;
+  if (deadline < todayDate) return [];
 
   const days = [];
   let cur = new Date(winStart);
   while (cur <= deadline) {
     const dStr = ds(cur);
-    const effectiveCap = (remainingCapacity[dStr] || 0) + taskScopedOverworkFor(occ, dStr);
-    if (effectiveCap > 0.001) days.push(dStr);
+    const effectiveCap = (remainingCapacity[dStr] || 0) + (extraRemaining[dStr] || 0);
+    if (!excludedDays?.has(dStr) && effectiveCap > 0.001) {
+      days.push({ date: dStr, free: effectiveCap });
+    }
     cur = addDays(cur, 1);
   }
-  if (!days.length) return out;
+  return days;
+}
 
-  const pinned = {};
-  let pinnedTotal = 0;
-  days.forEach(d => {
-    const pinnedH = pinnedHoursForOccurrence(occ, d);
-    if (pinnedH !== undefined) {
-      const capForThisTask = (remainingCapacity[d] || 0) + taskScopedOverworkFor(occ, d);
-      const ph = Math.min(+pinnedH || 0, capForThisTask);
-      if (ph > 0.001) {
-        pinned[d] = ph;
-        pinnedTotal += ph;
-        out[d] = Math.round(ph * 100) / 100;
-        const normalUse = Math.min(remainingCapacity[d] || 0, ph);
-        remainingCapacity[d] = Math.max(0, Math.round(((remainingCapacity[d] || 0) - normalUse) * 100) / 100);
-      }
-    }
-  });
-
-  const unpinned = days.filter(d => pinned[d] === undefined);
-  let toPlace    = Math.max(0, occ.hours - pinnedTotal);
-  if (!unpinned.length || toPlace < 0.001) return out;
-
+function buildDayWeights(occ, eligibleDays) {
   const dist = occ.dist || 'even';
-  const caps = unpinned.map(d => (remainingCapacity[d] || 0) + taskScopedOverworkFor(occ, d));
-
-  let weights = unpinned.map((d, i) => {
+  return eligibleDays.map((day, i) => {
     if (dist === 'even')     return 1;
-    if (dist === 'front')    return unpinned.length - i;
+    if (dist === 'front')    return eligibleDays.length - i;
     if (dist === 'back')     return i + 1;
-    if (dist === 'weighted') return Math.max(0, caps[i]);
+    if (dist === 'weighted') return Math.max(0, day.free);
     return 1;
   });
-  weights = weights.map((w, i) => caps[i] > 0.001 ? w : 0);
+}
 
-  const alloc  = new Array(unpinned.length).fill(0);
-  const locked = new Array(unpinned.length).fill(false);
+function normalizeAllocation(allocation) {
+  const out = {};
+  Object.entries(allocation).forEach(([d, h]) => {
+    const rounded = roundHours(h);
+    if (rounded > 0.001) out[d] = rounded;
+  });
+  return out;
+}
 
-  for (let iter = 0; iter < unpinned.length + 1; iter++) {
-    const freeIdx = weights.map((w,i) => (!locked[i] && w > 0) ? i : -1).filter(i => i >= 0);
-    if (!freeIdx.length || toPlace < 0.001) break;
-    const wTotal = freeIdx.reduce((s, i) => s + weights[i], 0);
-    if (!wTotal) break;
+function allocateOccurrenceConvergent(occ, remainingCapacity) {
+  // Place occ.hours across occ.windowStart → occ.deadline.
+  // Uses normal remainingCapacity first, then task-scoped overwork allowance.
+  // Overwork is consumed locally for this occurrence and never becomes global
+  // capacity for unrelated tasks.
+  const allocation = {};
+  const excludedDays = new Set();
+  const extraRemaining = {};
 
-    let overflow = 0;
-    freeIdx.forEach(i => {
-      const share    = (weights[i] / wTotal) * toPlace;
-      const newTotal = alloc[i] + share;
-      if (newTotal >= caps[i]) {
-        overflow  += newTotal - caps[i];
-        alloc[i]   = caps[i];
-        locked[i]  = true;
-      } else {
-        alloc[i]   = newTotal;
-      }
-    });
-    toPlace = overflow;
+  const todayDate = today();
+  const deadline  = parseDate(occ.deadline);
+  const winStart  = occ.notBefore
+    ? (parseDate(occ.notBefore) > todayDate ? parseDate(occ.notBefore) : todayDate)
+    : (parseDate(occ.windowStart) > todayDate ? parseDate(occ.windowStart) : todayDate);
+
+  if (deadline >= todayDate) {
+    let cur = new Date(winStart);
+    while (cur <= deadline) {
+      const dStr = ds(cur);
+      extraRemaining[dStr] = taskScopedOverworkFor(occ, dStr);
+      cur = addDays(cur, 1);
+    }
   }
 
-  unpinned.forEach((d, i) => {
-    if (alloc[i] > 0.001) {
-      const h = Math.round(alloc[i] * 100) / 100;
-      out[d] = h;
-      const normalUse = Math.min(remainingCapacity[d] || 0, h);
-      remainingCapacity[d] = Math.max(0, Math.round(((remainingCapacity[d] || 0) - normalUse) * 100) / 100);
+  let remaining = Math.max(0, +occ.hours || 0);
+
+  getEligibleDays(occ, remainingCapacity, extraRemaining).forEach(day => {
+    const pinnedH = pinnedHoursForOccurrence(occ, day.date);
+    if (pinnedH === undefined || remaining <= ALLOC_PROGRESS_EPSILON) return;
+
+    const used = consumeCapacityForOccurrence(
+      occ,
+      day.date,
+      Math.min(+pinnedH || 0, remaining),
+      remainingCapacity,
+      extraRemaining
+    );
+    if (used > 0.001) {
+      allocation[day.date] = (allocation[day.date] || 0) + used;
+      remaining -= used;
+      excludedDays.add(day.date);
     }
   });
 
-  return out;
+  let guard = 0;
+  while (remaining > ALLOC_EPSILON && guard++ < 1000) {
+    const eligible = getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays);
+    if (!eligible.length) break;
+
+    const weights = buildDayWeights(occ, eligible);
+    const totalWeight = weights.reduce((s, w) => s + Math.max(0, w), 0);
+    if (totalWeight <= 0) break;
+
+    const roundTarget = remaining;
+    let allocatedThisRound = 0;
+
+    eligible.forEach((day, i) => {
+      if (remaining <= ALLOC_PROGRESS_EPSILON) return;
+      const weight = Math.max(0, weights[i]);
+      if (weight <= 0) return;
+
+      const share = (weight / totalWeight) * roundTarget;
+      const used = consumeCapacityForOccurrence(
+        occ,
+        day.date,
+        Math.min(share, day.free, remaining),
+        remainingCapacity,
+        extraRemaining
+      );
+
+      if (used > 0.001) {
+        allocation[day.date] = (allocation[day.date] || 0) + used;
+        remaining -= used;
+        allocatedThisRound += used;
+      }
+    });
+
+    if (allocatedThisRound <= ALLOC_PROGRESS_EPSILON) break;
+  }
+
+  if (remaining <= ALLOC_EPSILON) remaining = 0;
+
+  return {
+    allocation: normalizeAllocation(allocation),
+    allocated: roundHours((+occ.hours || 0) - remaining),
+    shortfall: roundHours(remaining),
+    fullyAllocated: remaining <= ALLOC_EPSILON,
+  };
 }
 
 /* ─── Step 5: Main engine entry point ───────────────────────── */
@@ -517,75 +577,20 @@ function allocateSchedule() {
 
   const occurrences = expandTaskOccurrences(S.tasks, days);
 
-  // Allocate occurrences in priority/deadline batches.
-  // Within the same priority + deadline, tasks fair-share capacity proportionally.
-  // After fair-sharing, any unallocated hours from scaled-down proposals are
-  // redistributed by running each occurrence through a second allocation pass
-  // against the updated remaining capacity.
-  const occAllocs = {}; // occId → {dateStr: hours}
-  for (let i = 0; i < occurrences.length;) {
-    const first = occurrences[i];
-    const batch = [];
-    while (i < occurrences.length &&
-           occurrences[i].priority === first.priority &&
-           occurrences[i].deadline === first.deadline) {
-      batch.push(occurrences[i]);
-      i++;
-    }
-
-    // Pass 1: each occurrence proposes an allocation against the same capacity snapshot.
-    const proposals = {};
-    batch.forEach(occ => {
-      proposals[occ.occId] = allocateOccurrence(occ, { ...remainingCapacity });
-    });
-
-    // Scale each day's proposed demand down to actual remaining capacity (fair-share).
-    const touchedDays = new Set();
-    Object.values(proposals).forEach(a => Object.keys(a).forEach(d => touchedDays.add(d)));
-
-    touchedDays.forEach(d => {
-      const demand = batch.reduce((sum, occ) => sum + (proposals[occ.occId][d] || 0), 0);
-      const cap = remainingCapacity[d] || 0;
-      const scale = demand > cap && demand > 0 ? cap / demand : 1;
-
-      batch.forEach(occ => {
-        const raw = proposals[occ.occId][d] || 0;
-        if (raw <= 0) return;
-        const h = Math.round(raw * scale * 100) / 100;
-        if (h <= 0.001) return;
-        if (!occAllocs[occ.occId]) occAllocs[occ.occId] = {};
-        occAllocs[occ.occId][d] = Math.round(((occAllocs[occ.occId][d] || 0) + h) * 100) / 100;
-      });
-
-      const used = batch.reduce((sum, occ) => sum + ((occAllocs[occ.occId] || {})[d] || 0), 0);
-      remainingCapacity[d] = Math.max(0, Math.round((cap - used) * 100) / 100);
-    });
-
-    // Pass 2: redistribute unallocated hours from the fair-share scaling.
-    // Some occurrences got less than their full share on capped days (e.g. FCS days).
-    // Those hours need to flow to other days in the window with remaining capacity.
-    batch.forEach(occ => {
-      if (!occAllocs[occ.occId]) occAllocs[occ.occId] = {};
-      const allocated = Object.values(occAllocs[occ.occId]).reduce((s, h) => s + h, 0);
-      const shortfall = occ.hours - allocated;
-      if (shortfall < 0.05) return; // fully allocated
-
-      // Re-run allocation for just the shortfall against updated remaining capacity
-      const spillover = allocateOccurrence(
-        { ...occ, hours: shortfall },
-        remainingCapacity
-      );
-
-      Object.entries(spillover).forEach(([d, h]) => {
-        if (h <= 0.001) return;
-        occAllocs[occ.occId][d] = Math.round(((occAllocs[occ.occId][d] || 0) + h) * 100) / 100;
-        remainingCapacity[d] = Math.max(0, Math.round((remainingCapacity[d] - h) * 100) / 100);
-      });
-    });
-
-    // Ensure every occurrence has an allocation object, even if empty.
-    batch.forEach(occ => { if (!occAllocs[occ.occId]) occAllocs[occ.occId] = {}; });
-  }
+  // Allocate each occurrence to convergence. No proposal scaling or single
+  // spillover pass is allowed here: the allocator returns an explicit shortfall
+  // whenever it cannot place all requested hours.
+  const occAllocs = {};  // occId → {dateStr: hours}
+  const occResults = {}; // occId → {allocated, shortfall, fullyAllocated}
+  occurrences.forEach(occ => {
+    const result = allocateOccurrenceConvergent(occ, remainingCapacity);
+    occAllocs[occ.occId] = result.allocation;
+    occResults[occ.occId] = {
+      allocated: result.allocated,
+      shortfall: result.shortfall,
+      fullyAllocated: result.fullyAllocated,
+    };
+  });
 
   // Merge occurrence allocations back to task level
   const allocations = {}; // taskId → {dateStr: hours}
@@ -609,20 +614,37 @@ function allocateSchedule() {
   // Compute conflicts — tasks that couldn't be fully allocated
   const conflicts = {};
   occurrences.forEach(occ => {
-    const allocated = Object.values(occAllocs[occ.occId] || {}).reduce((s, h) => s + h, 0);
-    const shortfall = Math.round((occ.hours - allocated) * 100) / 100;
+    const result = occResults[occ.occId] || { allocated: 0, shortfall: occ.hours, fullyAllocated: false };
+    const allocated = result.allocated;
+    const shortfall = result.shortfall;
     if (shortfall > 0.05) {
       // Accumulate conflicts per task
       if (!conflicts[occ.taskId]) {
-        conflicts[occ.taskId] = { allocated: 0, needed: 0, shortfall: 0 };
+        conflicts[occ.taskId] = { allocated: 0, needed: 0, shortfall: 0, unallocated: 0, occurrences: [] };
       }
       conflicts[occ.taskId].needed     += occ.hours;
       conflicts[occ.taskId].allocated  += allocated;
       conflicts[occ.taskId].shortfall  += shortfall;
+      conflicts[occ.taskId].unallocated += shortfall;
+      conflicts[occ.taskId].occurrences.push({
+        occId: occ.occId,
+        deadline: occ.deadline,
+        allocated,
+        needed: occ.hours,
+        shortfall,
+        fullyAllocated: result.fullyAllocated,
+      });
     }
   });
 
-  _plan = { allocations, conflicts, dailyCapacity: capacity, dailyFree: free, dailyUsed, dailyEvents: events, window: { from, to } };
+  Object.values(conflicts).forEach(info => {
+    info.needed = roundHours(info.needed);
+    info.allocated = roundHours(info.allocated);
+    info.shortfall = roundHours(info.shortfall);
+    info.unallocated = roundHours(info.unallocated);
+  });
+
+  _plan = { allocations, occurrenceAllocations: occAllocs, occurrenceResults: occResults, conflicts, dailyCapacity: capacity, dailyFree: free, dailyUsed, dailyEvents: events, window: { from, to } };
   _planKey = key;
   return _plan;
 }
@@ -693,15 +715,19 @@ function allocationForHypotheticalTask(taskObj, deadlineOverride) {
   S.tasks = originalTasks;
   invalidatePlan();
 
-  return { allocated, plan };
+  return { allocated, plan, taskId: tempId };
 }
 
 function computeConflict(taskObj) {
-  if (taskObj.priority === 'optional') return null;
   if (parseDate(taskObj.deadline) < today()) return null;
 
-  const { allocated, plan } = allocationForHypotheticalTask(taskObj);
-  const shortfall = Math.round((taskObj.hours - allocated) * 100) / 100;
+  const { allocated, plan, taskId } = allocationForHypotheticalTask(taskObj);
+  const conflict = plan.conflicts?.[taskId];
+  const shortfall = conflict
+    ? roundHours(conflict.shortfall || 0)
+    : roundHours(taskObj.hours - allocated);
+  const needed = conflict ? roundHours(conflict.needed || taskObj.hours) : taskObj.hours;
+  const avail = conflict ? roundHours(conflict.allocated || 0) : roundHours(allocated);
 
   let freeDays = 0;
   let cur = new Date(today());
@@ -714,8 +740,8 @@ function computeConflict(taskObj) {
   if (shortfall <= 0.05) return null;
 
   return {
-    avail:       Math.round(allocated * 100) / 100,
-    needed:      taskObj.hours,
+    avail,
+    needed,
     shortfall,
     days:        freeDays,
     suggested:   findEarliestFittingDeadline(taskObj),
@@ -730,8 +756,9 @@ function findEarliestFittingDeadline(taskObj) {
   for (let i = 0; i < 365; i++) {
     cur = addDays(cur, 1);
     if (cur > hardLimit) return null;
-    const { allocated } = allocationForHypotheticalTask(taskObj, ds(cur));
-    if (allocated >= taskObj.hours - 0.05) return ds(cur);
+    const { allocated, plan, taskId } = allocationForHypotheticalTask(taskObj, ds(cur));
+    const conflict = plan.conflicts?.[taskId];
+    if (!conflict || (conflict.shortfall || 0) <= 0.05) return ds(cur);
   }
   return null;
 }
@@ -1380,8 +1407,11 @@ function updateDeadlineBadge() {
   if (!val || !_conflictTask) return;
 
   const testTask = { ..._conflictTask, deadline: val };
-  const { allocated } = allocationForHypotheticalTask(testTask, val);
-  const shortfall = Math.round((testTask.hours - allocated) * 10) / 10;
+  const { allocated, plan, taskId } = allocationForHypotheticalTask(testTask, val);
+  const conflict = plan.conflicts?.[taskId];
+  const shortfall = conflict
+    ? Math.round((conflict.shortfall || 0) * 10) / 10
+    : Math.round((testTask.hours - allocated) * 10) / 10;
 
   const badge = document.getElementById('copt-deadline-badge');
   const note  = document.getElementById('copt-deadline-note');
@@ -1542,6 +1572,79 @@ function updateIntBadges() {
   if (badge) badge.className = cls;
 }
 
+function cloneStateForProposal() {
+  return JSON.parse(JSON.stringify(S));
+}
+
+function applyConflictSelectionToState(selected, baseTask, editId) {
+  const task = { ...baseTask };
+
+  if (selected === 1) {
+    const newDeadline = document.getElementById('copt-deadline').value;
+    if (!newDeadline) return null;
+    task.deadline = newDeadline;
+    if (!task.repeat || task.repeat === 'none') task.date = newDeadline;
+  } else if (selected === 2) {
+    task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
+  } else if (selected === 4) {
+    task.priority = 'optional';
+  } else if (selected === 5) {
+    Object.entries(_demotedTasks).forEach(([id, checked]) => {
+      if (!checked) return;
+      const t = S.tasks.find(x => x.id === id);
+      if (t) t.priority = 'optional';
+    });
+  } else if (selected === 6) {
+    Object.entries(_intensityOverrides).forEach(([dStr, val]) => {
+      S.intensities[dStr] = val;
+    });
+  }
+
+  _commitTask(task, editId);
+
+  if (selected === 3) {
+    // Overwork is intentionally added after _commitTask, because editing a task
+    // clears stale allowances for that task id.
+    if (!S.taskOverworkAllowances) S.taskOverworkAllowances = {};
+    const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
+    Object.entries(_overworkDays).forEach(([dStr, on]) => {
+      if (!on || extra <= 0) return;
+      const key = task.id + '|' + task.deadline + '|' + dStr;
+      S.taskOverworkAllowances[key] = roundHours(extra);
+    });
+    invalidatePlan();
+  }
+
+  return task;
+}
+
+function verifyConflictResolution(selected, baseTask, editId) {
+  const originalState = S;
+  const originalPlan = _plan;
+  const originalPlanKey = _planKey;
+  const draftState = cloneStateForProposal();
+
+  try {
+    S = draftState;
+    invalidatePlan();
+    const proposedTask = applyConflictSelectionToState(selected, baseTask, editId);
+    if (!proposedTask) return { ok: false, message: 'Please complete the selected option.' };
+
+    const plan = allocateSchedule();
+    const conflict = plan.conflicts?.[proposedTask.id];
+    const shortfall = roundHours(conflict?.shortfall || 0);
+    return {
+      ok: shortfall <= ALLOC_EPSILON,
+      shortfall,
+      proposedTask,
+    };
+  } finally {
+    S = originalState;
+    _plan = originalPlan;
+    _planKey = originalPlanKey;
+  }
+}
+
 function applyConflictResolution() {
   // Find selected option
   let selected = 0;
@@ -1551,50 +1654,29 @@ function applyConflictResolution() {
   if (!selected) { showToast('Please select a resolution option'); return; }
 
   const task = { ..._conflictTask };
+  const editId = _pendingTask?.editingId || (S.tasks.some(t => t.id === task.id) ? task.id : null);
 
-  if (selected === 1) {
-    // Extend deadline
-    const newDeadline = document.getElementById('copt-deadline').value;
-    if (!newDeadline) { showToast('Please set a new deadline'); return; }
-    task.deadline = newDeadline;
-    if (!task.repeat || task.repeat === 'none') task.date = newDeadline;
-  } else if (selected === 2) {
-    // Reduce hours
-    task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
-  } else if (selected === 3) {
-    // Overwork days — task-scoped only.
-    // This lets THIS task exceed normal free capacity on selected days without
-    // increasing global capacity for unrelated tasks.
-    if (!S.taskOverworkAllowances) S.taskOverworkAllowances = {};
-    const extra = parseFloat(document.getElementById('copt-extra-hrs').value) || 0;
-    Object.entries(_overworkDays).forEach(([dStr, on]) => {
-      if (!on || extra <= 0) return;
-      const key = task.id + '|' + task.deadline + '|' + dStr;
-      S.taskOverworkAllowances[key] = Math.round(extra * 100) / 100;
-    });
-  } else if (selected === 4) {
-    // Mark optional
-    task.priority = 'optional';
-  } else if (selected === 5) {
-    // Demote other tasks
-    Object.entries(_demotedTasks).forEach(([id, checked]) => {
-      if (!checked) return;
-      const t = S.tasks.find(x => x.id === id);
-      if (t) t.priority = 'optional';
-    });
-  } else if (selected === 6) {
-    // Apply intensity overrides
-    Object.entries(_intensityOverrides).forEach(([dStr, val]) => {
-      S.intensities[dStr] = val;
-    });
+  if (selected !== 7) {
+    const verified = verifyConflictResolution(selected, task, editId);
+    if (!verified.ok) {
+      const remaining = verified.shortfall !== undefined ? verified.shortfall : _conflictData?.shortfall;
+      showToast(verified.message || `Still ${remaining}h short. Choose another option or add more capacity.`);
+      return;
+    }
   }
-  // Option 7: save anyway — no changes to task
+
+  const proposedTask = applyConflictSelectionToState(selected, task, editId);
+  if (!proposedTask) { showToast('Please complete the selected option'); return; }
 
   // Commit the task
-  _commitTask(task, _pendingTask?.editingId || null);
   closeConflict();
   save(); render();
-  showToast('Saved');
+  if (selected === 7) {
+    revalidateExistingTasks(false);
+    showToast('Saved with unresolved scheduling conflict');
+  } else {
+    showToast('Saved');
+  }
 }
 
 function checkTaskOverload() {

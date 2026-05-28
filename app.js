@@ -1070,20 +1070,24 @@ function syncNavButtons() {
 /* ── Sidebar ── */
 function renderSidebar() {
   document.getElementById('sb-baseline').textContent = S.baseline;
+  const plan = allocateSchedule();
 
   const sbTasks = document.getElementById('sb-tasks');
   sbTasks.innerHTML = '';
   S.tasks.forEach(t => {
+    const conflict = plan.conflicts?.[t.id];
     const rem = Math.max(0, t.hours - (t.logged ?? 0));
     const rl  = t.repeat && t.repeat !== 'none' ? repeatLabel(t) : '';
     const el  = document.createElement('div');
-    el.className = 'sb-pill';
+    el.className = `sb-pill${conflict?.type === 'soft' ? ' needs-review' : ''}`;
     el.innerHTML = `<span class="sb-dot" style="background:${t.color}"></span>
       <span class="sb-name">${t.name}</span>
-      <span class="sb-hrs">${rl ? rl : rem + 'h'}</span>`;
+      <span class="sb-hrs">${conflict?.type === 'soft' ? roundHours(conflict.shortfall) + 'h short' : (rl ? rl : rem + 'h')}</span>`;
     el.onclick = () => openModal('task', t.id);
     sbTasks.appendChild(el);
   });
+
+  renderReviewSidebar(plan);
 
   const sbEvents = document.getElementById('sb-events');
   sbEvents.innerHTML = '';
@@ -1095,6 +1099,32 @@ function renderSidebar() {
       <span class="sb-hrs">${e.date?.slice(5) ?? ''}</span>`;
     el.onclick = () => openModal('event', e.id);
     sbEvents.appendChild(el);
+  });
+}
+
+function softConflictEntries(plan = allocateSchedule()) {
+  return plan.conflictSummary?.soft || [];
+}
+
+function renderReviewSidebar(plan = allocateSchedule()) {
+  const wrap = document.getElementById('sb-review-wrap');
+  const list = document.getElementById('sb-review');
+  if (!wrap || !list) return;
+
+  const soft = softConflictEntries(plan);
+  wrap.classList.toggle('hidden', !soft.length);
+  list.innerHTML = '';
+
+  soft.slice(0, 4).forEach(info => {
+    const task = S.tasks.find(t => t.id === info.taskId);
+    if (!task) return;
+    const el = document.createElement('div');
+    el.className = 'sb-pill review';
+    el.innerHTML = `<span class="sb-dot" style="background:${task.color || '#9b9b9b'}"></span>
+      <span class="sb-name">${task.name}</span>
+      <span class="sb-hrs">${roundHours(info.shortfall)}h short</span>`;
+    el.onclick = () => openReviewPanel(info.taskId);
+    list.appendChild(el);
   });
 }
 
@@ -1844,8 +1874,9 @@ function verifyConflictResolution(selected, baseTask, editId) {
     const shortfall = roundHours(conflict?.shortfall || 0);
     const softOnly = conflict?.type === 'soft' && occurrencePriorityRank({ priority: proposedTask.priority || 'mandatory' }) > 1;
     const hardConflicts = plan.conflictSummary?.hard || [];
+    const acceptsSoftShortfall = selected === 4 || selected === 7;
     return {
-      ok: (shortfall <= ALLOC_EPSILON || softOnly) && hardConflicts.length === 0,
+      ok: (shortfall <= ALLOC_EPSILON || (softOnly && acceptsSoftShortfall)) && hardConflicts.length === 0,
       shortfall,
       hardConflicts,
       proposedTask,
@@ -1909,6 +1940,112 @@ function checkTaskOverload() {
   } else if (soft.length) {
     showOverloadToast(`This change displaced ${soft.length} optional task${soft.length!==1?'s':''}.`);
   }
+}
+
+function softConflictInfoForTask(task) {
+  const plan = allocateSchedule();
+  const info = plan.conflicts?.[task.id];
+  if (!info || info.type !== 'soft') return null;
+
+  return {
+    avail: roundHours(info.allocated || 0),
+    needed: roundHours(info.needed || task.hours),
+    shortfall: roundHours(info.shortfall || 0),
+    days: Math.max(1, (info.occurrences || []).length),
+    suggested: findEarliestFittingDeadline(task),
+    allBlocked: false,
+    soft: true,
+  };
+}
+
+function openReviewPanel(taskId) {
+  const bg = document.getElementById('review-bg');
+  const list = document.getElementById('review-list');
+  const summary = document.getElementById('review-summary');
+  if (!bg || !list || !summary) return;
+
+  const plan = allocateSchedule();
+  const soft = softConflictEntries(plan);
+  const entries = taskId ? soft.filter(c => c.taskId === taskId) : soft;
+
+  summary.textContent = soft.length
+    ? `${soft.length} task${soft.length!==1?'s':''} with unscheduled hours`
+    : 'No tasks need review.';
+
+  list.innerHTML = '';
+  if (!entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'review-empty';
+    empty.textContent = 'Nothing needs review right now.';
+    list.appendChild(empty);
+  }
+
+  entries.forEach(info => {
+    const task = S.tasks.find(t => t.id === info.taskId);
+    if (!task) return;
+    const card = document.createElement('div');
+    card.className = 'review-item';
+    const scheduled = roundHours(info.allocated || 0);
+    const needed = roundHours(info.needed || task.hours);
+    const shortfall = roundHours(info.shortfall || 0);
+    const reason = info.reason === 'displaced_by_higher_priority'
+      ? 'Lower priority than scheduled work'
+      : info.reason === 'event_blocked'
+        ? 'Blocked by events'
+        : 'Not enough remaining capacity';
+
+    card.innerHTML = `
+      <div class="review-item-head">
+        <span class="sb-dot" style="background:${task.color || '#9b9b9b'}"></span>
+        <div class="review-title-wrap">
+          <div class="review-title">${task.name}</div>
+          <div class="review-reason">${reason}</div>
+        </div>
+        <span class="review-badge">${shortfall}h short</span>
+      </div>
+      <div class="review-meter">
+        <div class="review-meter-fill" style="width:${needed ? Math.min(100, (scheduled / needed) * 100) : 0}%"></div>
+      </div>
+      <div class="review-stats">
+        <span>${scheduled}h scheduled</span>
+        <span>${needed}h needed</span>
+      </div>
+      <div class="review-actions">
+        <button class="btn-ghost" data-action="edit">Edit</button>
+        <button class="btn-primary" data-action="resolve">Resolve</button>
+        <button class="btn-ghost" data-action="keep">Keep deferred</button>
+      </div>`;
+
+    card.querySelector('[data-action="edit"]').onclick = () => {
+      closeReviewPanel();
+      openModal('task', task.id);
+    };
+    card.querySelector('[data-action="resolve"]').onclick = () => {
+      openSoftConflictResolution(task);
+    };
+    card.querySelector('[data-action="keep"]').onclick = () => {
+      showToast(`${task.name} kept deferred`);
+    };
+    list.appendChild(card);
+  });
+
+  bg.classList.remove('hidden');
+}
+
+function closeReviewPanel() {
+  document.getElementById('review-bg')?.classList.add('hidden');
+}
+
+function openSoftConflictResolution(task) {
+  const conflict = softConflictInfoForTask(task);
+  if (!conflict) {
+    showToast('This task no longer needs review');
+    render();
+    return;
+  }
+  closeReviewPanel();
+  _pendingTask = { obj: { ...task }, editingId: task.id, isEdit: true, softReview: true };
+  showConflictDialog(conflict, { ...task });
 }
 
 function showOverloadToast(msg) {
@@ -2284,6 +2421,7 @@ document.addEventListener('click', function(e) {
   }
   if (e.target.id === 'modal-bg') closeModal();
   if (e.target.id === 'conflict-bg') closeConflict();
+  if (e.target.id === 'review-bg') closeReviewPanel();
 });
 
 /* ══════════════════════════════════════════

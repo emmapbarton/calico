@@ -278,13 +278,33 @@ function expandTaskOccurrences(tasks, days) {
     }
   });
 
-  // Sort: mandatory first, then by deadline urgency
+  // Sort into priority waves, then by deadline urgency and demand pressure.
   occurrences.sort((a, b) => {
-    if (a.priority !== b.priority) return a.priority === 'mandatory' ? -1 : 1;
-    return a.deadline < b.deadline ? -1 : a.deadline > b.deadline ? 1 : 0;
+    const pa = occurrencePriorityRank(a);
+    const pb = occurrencePriorityRank(b);
+    if (pa !== pb) return pa - pb;
+    if (a.deadline !== b.deadline) return a.deadline < b.deadline ? -1 : 1;
+    const ua = occurrenceUrgency(a);
+    const ub = occurrenceUrgency(b);
+    if (ua !== ub) return ub - ua;
+    return a.occId < b.occId ? -1 : a.occId > b.occId ? 1 : 0;
   });
 
   return occurrences;
+}
+
+function occurrencePriorityRank(occ) {
+  if (occ.priority === 'hard' || occ.priority === 'hard-deadline') return 0;
+  if (occ.priority === 'mandatory') return 1;
+  if (occ.priority === 'deferred' || occ.priority === 'bumped') return 3;
+  return 2;
+}
+
+function occurrenceUrgency(occ) {
+  const start = parseDate(occ.notBefore || occ.windowStart || ds(today()));
+  const end = parseDate(occ.deadline);
+  const days = Math.max(1, Math.floor((end - start) / 86400000) + 1);
+  return (+occ.hours || 0) / days;
 }
 
 function engineRepeatOccursOn(task, dateStr) {
@@ -457,6 +477,22 @@ function normalizeAllocation(allocation) {
   return out;
 }
 
+function adjustAllocationToTotal(allocation, targetTotal) {
+  const out = normalizeAllocation(allocation);
+  const keys = Object.keys(out);
+  if (!keys.length) return out;
+
+  const target = roundHours(targetTotal);
+  const current = roundHours(keys.reduce((s, d) => s + out[d], 0));
+  let diff = roundHours(target - current);
+  if (Math.abs(diff) < 0.01) return out;
+
+  const lastKey = keys[keys.length - 1];
+  out[lastKey] = roundHours(out[lastKey] + diff);
+  if (out[lastKey] <= 0.001) delete out[lastKey];
+  return out;
+}
+
 function allocateOccurrenceConvergent(occ, remainingCapacity) {
   // Place occ.hours across occ.windowStart → occ.deadline.
   // Uses normal remainingCapacity first, then task-scoped overwork allowance.
@@ -538,13 +574,124 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
   }
 
   if (remaining <= ALLOC_EPSILON) remaining = 0;
+  const allocated = (+occ.hours || 0) - remaining;
 
   return {
-    allocation: normalizeAllocation(allocation),
-    allocated: roundHours((+occ.hours || 0) - remaining),
+    allocation: adjustAllocationToTotal(allocation, allocated),
+    allocated: roundHours(allocated),
     shortfall: roundHours(remaining),
     fullyAllocated: remaining <= ALLOC_EPSILON,
   };
+}
+
+function batchCapacityForOccurrences(batch, remainingCapacity) {
+  const normalDays = new Set();
+  let taskScopedExtra = 0;
+
+  batch.forEach(occ => {
+    const extraRemaining = {};
+    const todayDate = today();
+    const deadline = parseDate(occ.deadline);
+    const winStart = occ.notBefore
+      ? (parseDate(occ.notBefore) > todayDate ? parseDate(occ.notBefore) : todayDate)
+      : (parseDate(occ.windowStart) > todayDate ? parseDate(occ.windowStart) : todayDate);
+
+    if (deadline < todayDate) return;
+
+    let cur = new Date(winStart);
+    while (cur <= deadline) {
+      const dStr = ds(cur);
+      if ((remainingCapacity[dStr] || 0) > 0.001) normalDays.add(dStr);
+      const extra = taskScopedOverworkFor(occ, dStr);
+      if (extra > 0.001) {
+        extraRemaining[dStr] = extra;
+        taskScopedExtra += extra;
+      }
+      cur = addDays(cur, 1);
+    }
+  });
+
+  const normal = Array.from(normalDays).reduce((s, d) => s + (remainingCapacity[d] || 0), 0);
+  return normal + taskScopedExtra;
+}
+
+function allocateOccurrenceBatchConvergent(batch, remainingCapacity) {
+  if (batch.length === 1) {
+    const only = batch[0];
+    return { [only.occId]: allocateOccurrenceConvergent(only, remainingCapacity) };
+  }
+
+  const results = {};
+  const totalNeeded = batch.reduce((s, occ) => s + (+occ.hours || 0), 0);
+  const available = batchCapacityForOccurrences(batch, remainingCapacity);
+  const constrained = available + ALLOC_EPSILON < totalNeeded;
+
+  let quotaRemaining = constrained ? Math.max(0, available) : totalNeeded;
+
+  batch.forEach((occ, index) => {
+    let quota = +occ.hours || 0;
+    if (constrained) {
+      if (index === batch.length - 1) {
+        quota = quotaRemaining;
+      } else {
+        quota = Math.min(occ.hours, (occ.hours / totalNeeded) * available);
+        quotaRemaining -= quota;
+      }
+    }
+
+    const result = allocateOccurrenceConvergent({ ...occ, hours: Math.max(0, quota) }, remainingCapacity);
+    results[occ.occId] = {
+      allocation: result.allocation,
+      allocated: result.allocated,
+      shortfall: roundHours((+occ.hours || 0) - result.allocated),
+      fullyAllocated: (+occ.hours || 0) - result.allocated <= ALLOC_EPSILON,
+    };
+  });
+
+  if (!constrained) {
+    batch.forEach(occ => {
+      const result = results[occ.occId];
+      if (result.shortfall <= ALLOC_EPSILON) return;
+      const extra = allocateOccurrenceConvergent({ ...occ, hours: result.shortfall }, remainingCapacity);
+      Object.entries(extra.allocation).forEach(([d, h]) => {
+        result.allocation[d] = (result.allocation[d] || 0) + h;
+      });
+      result.allocated = roundHours(result.allocated + extra.allocated);
+      result.shortfall = roundHours((+occ.hours || 0) - result.allocated);
+      result.fullyAllocated = result.shortfall <= ALLOC_EPSILON;
+      result.allocation = adjustAllocationToTotal(result.allocation, result.allocated);
+    });
+  }
+
+  return results;
+}
+
+function conflictTypeForOccurrence(occ) {
+  return occurrencePriorityRank(occ) <= 1 ? 'hard' : 'soft';
+}
+
+function conflictReasonForOccurrence(occ, result, free) {
+  const todayDate = today();
+  const deadline = parseDate(occ.deadline);
+  let sawFreeDay = false;
+
+  let cur = parseDate(occ.windowStart);
+  if (cur < todayDate) cur = todayDate;
+  if (occ.notBefore && parseDate(occ.notBefore) > cur) cur = parseDate(occ.notBefore);
+
+  while (cur <= deadline) {
+    if ((free[ds(cur)] || 0) > 0.001 || taskScopedOverworkFor(occ, ds(cur)) > 0.001) {
+      sawFreeDay = true;
+      break;
+    }
+    cur = addDays(cur, 1);
+  }
+
+  if (!sawFreeDay) return 'event_blocked';
+  if (conflictTypeForOccurrence(occ) === 'soft' && result.allocated < (+occ.hours || 0)) {
+    return 'displaced_by_higher_priority';
+  }
+  return 'insufficient_capacity';
 }
 
 /* ─── Step 5: Main engine entry point ───────────────────────── */
@@ -577,20 +724,34 @@ function allocateSchedule() {
 
   const occurrences = expandTaskOccurrences(S.tasks, days);
 
-  // Allocate each occurrence to convergence. No proposal scaling or single
-  // spillover pass is allowed here: the allocator returns an explicit shortfall
-  // whenever it cannot place all requested hours.
+  // Allocate priority waves to convergence. Occurrences with the same priority
+  // and deadline share constrained capacity proportionally instead of
+  // first-come-first-served.
   const occAllocs = {};  // occId → {dateStr: hours}
   const occResults = {}; // occId → {allocated, shortfall, fullyAllocated}
-  occurrences.forEach(occ => {
-    const result = allocateOccurrenceConvergent(occ, remainingCapacity);
-    occAllocs[occ.occId] = result.allocation;
-    occResults[occ.occId] = {
-      allocated: result.allocated,
-      shortfall: result.shortfall,
-      fullyAllocated: result.fullyAllocated,
-    };
-  });
+  for (let i = 0; i < occurrences.length;) {
+    const first = occurrences[i];
+    const batch = [];
+    while (
+      i < occurrences.length &&
+      occurrencePriorityRank(occurrences[i]) === occurrencePriorityRank(first) &&
+      occurrences[i].deadline === first.deadline
+    ) {
+      batch.push(occurrences[i]);
+      i++;
+    }
+
+    const batchResults = allocateOccurrenceBatchConvergent(batch, remainingCapacity);
+    batch.forEach(occ => {
+      const result = batchResults[occ.occId];
+      occAllocs[occ.occId] = result.allocation;
+      occResults[occ.occId] = {
+        allocated: result.allocated,
+        shortfall: result.shortfall,
+        fullyAllocated: result.fullyAllocated,
+      };
+    });
+  }
 
   // Merge occurrence allocations back to task level
   const allocations = {}; // taskId → {dateStr: hours}
@@ -611,16 +772,36 @@ function allocateSchedule() {
     if (used > 0.001) dailyUsed[d] = Math.round(used * 100) / 100;
   });
 
-  // Compute conflicts — tasks that couldn't be fully allocated
+  // Compute conflicts — tasks that couldn't be fully allocated. Keep the
+  // existing taskId-indexed map for current UI compatibility, and also expose a
+  // grouped schedule health summary for non-cascading conflict UI.
   const conflicts = {};
+  const conflictSummary = { hard: [], soft: [] };
+  const affectedTasks = [];
   occurrences.forEach(occ => {
     const result = occResults[occ.occId] || { allocated: 0, shortfall: occ.hours, fullyAllocated: false };
     const allocated = result.allocated;
     const shortfall = result.shortfall;
     if (shortfall > 0.05) {
+      const type = conflictTypeForOccurrence(occ);
+      const reason = conflictReasonForOccurrence(occ, result, free);
+      const conflictEntry = {
+        taskId: occ.taskId,
+        occurrenceId: occ.occId,
+        needed: roundHours(occ.hours),
+        allocated: roundHours(allocated),
+        shortfall: roundHours(shortfall),
+        originalDeadline: occ.deadline,
+        suggested: null,
+        type,
+        reason,
+      };
+      conflictSummary[type].push(conflictEntry);
+      if (!affectedTasks.includes(occ.taskId)) affectedTasks.push(occ.taskId);
+
       // Accumulate conflicts per task
       if (!conflicts[occ.taskId]) {
-        conflicts[occ.taskId] = { allocated: 0, needed: 0, shortfall: 0, unallocated: 0, occurrences: [] };
+        conflicts[occ.taskId] = { taskId: occ.taskId, allocated: 0, needed: 0, shortfall: 0, unallocated: 0, type, reason, occurrences: [] };
       }
       conflicts[occ.taskId].needed     += occ.hours;
       conflicts[occ.taskId].allocated  += allocated;
@@ -633,7 +814,11 @@ function allocateSchedule() {
         needed: occ.hours,
         shortfall,
         fullyAllocated: result.fullyAllocated,
+        type,
+        reason,
       });
+      if (type === 'hard') conflicts[occ.taskId].type = 'hard';
+      if (conflicts[occ.taskId].reason !== reason) conflicts[occ.taskId].reason = 'mixed';
     }
   });
 
@@ -644,7 +829,20 @@ function allocateSchedule() {
     info.unallocated = roundHours(info.unallocated);
   });
 
-  _plan = { allocations, occurrenceAllocations: occAllocs, occurrenceResults: occResults, conflicts, dailyCapacity: capacity, dailyFree: free, dailyUsed, dailyEvents: events, window: { from, to } };
+  _plan = {
+    allocations,
+    occurrenceAllocations: occAllocs,
+    occurrenceResults: occResults,
+    conflicts,
+    conflictsByTask: conflicts,
+    conflictSummary,
+    affectedTasks,
+    dailyCapacity: capacity,
+    dailyFree: free,
+    dailyUsed,
+    dailyEvents: events,
+    window: { from, to },
+  };
   _planKey = key;
   return _plan;
 }
@@ -720,9 +918,11 @@ function allocationForHypotheticalTask(taskObj, deadlineOverride) {
 
 function computeConflict(taskObj) {
   if (parseDate(taskObj.deadline) < today()) return null;
+  if (occurrencePriorityRank({ priority: taskObj.priority || 'mandatory' }) > 1) return null;
 
   const { allocated, plan, taskId } = allocationForHypotheticalTask(taskObj);
   const conflict = plan.conflicts?.[taskId];
+  if (conflict && conflict.type !== 'hard') return null;
   const shortfall = conflict
     ? roundHours(conflict.shortfall || 0)
     : roundHours(taskObj.hours - allocated);
@@ -789,7 +989,12 @@ function conflictInfoForExistingTask(task) {
 function revalidateExistingTasks(showDialog) {
   invalidatePlan();
   const plan = allocateSchedule();
-  const ids = Object.keys(plan.conflicts || {});
+  const ids = (plan.conflictSummary?.hard || []).map(c => c.taskId);
+  const softCount = plan.conflictSummary?.soft?.length || 0;
+  if (!ids.length && softCount) {
+    showOverloadToast(`This change displaced ${softCount} optional task${softCount!==1?'s':''}.`);
+    return false;
+  }
   if (!ids.length) return false;
 
   const task = S.tasks.find(t => t.id === ids[0]);
@@ -1633,8 +1838,9 @@ function verifyConflictResolution(selected, baseTask, editId) {
     const plan = allocateSchedule();
     const conflict = plan.conflicts?.[proposedTask.id];
     const shortfall = roundHours(conflict?.shortfall || 0);
+    const softOnly = conflict?.type === 'soft' && occurrencePriorityRank({ priority: proposedTask.priority || 'mandatory' }) > 1;
     return {
-      ok: shortfall <= ALLOC_EPSILON,
+      ok: shortfall <= ALLOC_EPSILON || softOnly,
       shortfall,
       proposedTask,
     };
@@ -1681,12 +1887,16 @@ function applyConflictResolution() {
 
 function checkTaskOverload() {
   const plan = allocateSchedule();
-  const conflictEntries = Object.entries(plan.conflicts || {});
-  if (conflictEntries.length) {
-    const [taskId, info] = conflictEntries[0];
+  const hard = plan.conflictSummary?.hard || [];
+  const soft = plan.conflictSummary?.soft || [];
+  if (hard.length) {
+    const info = hard[0];
+    const taskId = info.taskId;
     const task = S.tasks.find(t => t.id === taskId);
     const name = task ? task.name : 'A task';
     showOverloadToast(`${name}: ${Math.round(info.shortfall*10)/10}h cannot be scheduled. Consider extending the deadline or reducing hours.`);
+  } else if (soft.length) {
+    showOverloadToast(`This change displaced ${soft.length} optional task${soft.length!==1?'s':''}.`);
   }
 }
 

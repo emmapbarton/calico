@@ -518,9 +518,10 @@ function allocateSchedule() {
   const occurrences = expandTaskOccurrences(S.tasks, days);
 
   // Allocate occurrences in priority/deadline batches.
-  // Within the same priority + deadline, tasks fair-share capacity instead of
-  // the first task greedily consuming the day. This preserves the expected
-  // behaviour: two 4h mandatory tasks due today with 6h free become 3h + 3h.
+  // Within the same priority + deadline, tasks fair-share capacity proportionally.
+  // After fair-sharing, any unallocated hours from scaled-down proposals are
+  // redistributed by running each occurrence through a second allocation pass
+  // against the updated remaining capacity.
   const occAllocs = {}; // occId → {dateStr: hours}
   for (let i = 0; i < occurrences.length;) {
     const first = occurrences[i];
@@ -532,13 +533,13 @@ function allocateSchedule() {
       i++;
     }
 
-    // Each occurrence proposes an allocation against the same current capacity.
+    // Pass 1: each occurrence proposes an allocation against the same capacity snapshot.
     const proposals = {};
     batch.forEach(occ => {
       proposals[occ.occId] = allocateOccurrence(occ, { ...remainingCapacity });
     });
 
-    // Scale each day's proposed demand down to the actual remaining capacity.
+    // Scale each day's proposed demand down to actual remaining capacity (fair-share).
     const touchedDays = new Set();
     Object.values(proposals).forEach(a => Object.keys(a).forEach(d => touchedDays.add(d)));
 
@@ -558,6 +559,28 @@ function allocateSchedule() {
 
       const used = batch.reduce((sum, occ) => sum + ((occAllocs[occ.occId] || {})[d] || 0), 0);
       remainingCapacity[d] = Math.max(0, Math.round((cap - used) * 100) / 100);
+    });
+
+    // Pass 2: redistribute unallocated hours from the fair-share scaling.
+    // Some occurrences got less than their full share on capped days (e.g. FCS days).
+    // Those hours need to flow to other days in the window with remaining capacity.
+    batch.forEach(occ => {
+      if (!occAllocs[occ.occId]) occAllocs[occ.occId] = {};
+      const allocated = Object.values(occAllocs[occ.occId]).reduce((s, h) => s + h, 0);
+      const shortfall = occ.hours - allocated;
+      if (shortfall < 0.05) return; // fully allocated
+
+      // Re-run allocation for just the shortfall against updated remaining capacity
+      const spillover = allocateOccurrence(
+        { ...occ, hours: shortfall },
+        remainingCapacity
+      );
+
+      Object.entries(spillover).forEach(([d, h]) => {
+        if (h <= 0.001) return;
+        occAllocs[occ.occId][d] = Math.round(((occAllocs[occ.occId][d] || 0) + h) * 100) / 100;
+        remainingCapacity[d] = Math.max(0, Math.round((remainingCapacity[d] - h) * 100) / 100);
+      });
     });
 
     // Ensure every occurrence has an allocation object, even if empty.

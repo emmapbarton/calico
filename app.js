@@ -1997,6 +1997,11 @@ function onTaskRepeatChange() {
   document.getElementById('task-start-date-row').classList.toggle('hidden', !isRepeat);
   // When repeating, deadline becomes "occurs every X" and start date is the anchor
   document.getElementById('task-deadline-label').textContent = isRepeat ? 'First occurrence' : 'Deadline';
+  if (isRepeat) {
+    const first = document.getElementById('f-deadline').value;
+    const start = document.getElementById('f-task-start-date');
+    if (first && (!start.value || start.value === ds(today()))) start.value = first;
+  }
 }
 
 function onTaskRepeatEndChange() {
@@ -2141,7 +2146,10 @@ function saveItem() {
       repeat:   repeatVal,
     };
     if (repeatVal !== 'none') {
-      obj.date = document.getElementById('f-task-start-date').value || obj.deadline;
+      // For repeating tasks, the visible "First occurrence" date is the
+      // recurrence anchor. Keep date/deadline aligned so the first occurrence
+      // does not silently anchor to today's default start date.
+      obj.date = obj.deadline;
       const endType = document.getElementById('f-task-repeat-end-type').value;
       obj.repeatEndType = endType;
       if (endType === 'date') {

@@ -1981,7 +1981,7 @@ function softConflictInfoForTask(task) {
     needed: roundHours(info.needed || task.hours),
     shortfall: roundHours(info.shortfall || 0),
     days: Math.max(1, (info.occurrences || []).length),
-    suggested: findEarliestFittingDeadline(task),
+    suggested: null,
     allBlocked: false,
     soft: true,
   };
@@ -2073,7 +2073,7 @@ function openSoftConflictResolution(task) {
     return;
   }
   closeReviewPanel();
-  _pendingTask = { obj: { ...task }, editingId: task.id, isEdit: true, softReview: true };
+  _pendingTask = { obj: { ...task }, editingId: task.id, isEdit: true };
   showConflictDialog(conflict, { ...task });
 }
 

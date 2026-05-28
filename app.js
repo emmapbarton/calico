@@ -1803,6 +1803,10 @@ function applyConflictSelectionToState(selected, baseTask, editId) {
     Object.entries(_intensityOverrides).forEach(([dStr, val]) => {
       S.intensities[dStr] = val;
     });
+  } else if (selected === 7) {
+    // "Save anyway" means this task accepts partial scheduling. It must not
+    // displace already accepted mandatory work on the next full recalculation.
+    task.priority = 'deferred';
   }
 
   _commitTask(task, editId);
@@ -1839,9 +1843,11 @@ function verifyConflictResolution(selected, baseTask, editId) {
     const conflict = plan.conflicts?.[proposedTask.id];
     const shortfall = roundHours(conflict?.shortfall || 0);
     const softOnly = conflict?.type === 'soft' && occurrencePriorityRank({ priority: proposedTask.priority || 'mandatory' }) > 1;
+    const hardConflicts = plan.conflictSummary?.hard || [];
     return {
-      ok: shortfall <= ALLOC_EPSILON || softOnly,
+      ok: (shortfall <= ALLOC_EPSILON || softOnly) && hardConflicts.length === 0,
       shortfall,
+      hardConflicts,
       proposedTask,
     };
   } finally {
@@ -1866,7 +1872,12 @@ function applyConflictResolution() {
     const verified = verifyConflictResolution(selected, task, editId);
     if (!verified.ok) {
       const remaining = verified.shortfall !== undefined ? verified.shortfall : _conflictData?.shortfall;
-      showToast(verified.message || `Still ${remaining}h short. Choose another option or add more capacity.`);
+      const otherHard = (verified.hardConflicts || []).filter(c => c.taskId !== task.id);
+      if (otherHard.length) {
+        showToast(`That would leave ${otherHard.length} mandatory task${otherHard.length!==1?'s':''} short. Add more capacity or choose another option.`);
+      } else {
+        showToast(verified.message || `Still ${remaining}h short. Choose another option or add more capacity.`);
+      }
       return;
     }
   }

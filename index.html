@@ -63,6 +63,11 @@
       <div class="sb-section-label">Tasks</div>
       <div id="sb-tasks"></div>
       <button class="ghost-btn" onclick="openModal('task')">+ Add task</button>
+      <div id="sb-review-wrap" class="hidden">
+        <div class="sb-section-label" style="margin-top:1.25rem">Needs review</div>
+        <div id="sb-review"></div>
+        <button class="ghost-btn review" onclick="openReviewPanel()">Review schedule</button>
+      </div>
       <div class="sb-section-label" style="margin-top:1.25rem">Events</div>
       <div id="sb-events"></div>
       <button class="ghost-btn" onclick="openModal('event')">+ Add event</button>
@@ -480,6 +485,26 @@
       </div>
     </div>
 
+  </div>
+</div>
+
+
+<!-- SOFT CONFLICT / SCHEDULE HEALTH PANEL -->
+<div id="review-bg" class="modal-bg hidden">
+  <div class="modal review-modal" onclick="event.stopPropagation()">
+    <div class="modal-head">
+      <span class="modal-title">Needs review</span>
+      <button class="modal-x" onclick="closeReviewPanel()">✕</button>
+    </div>
+    <div class="review-body">
+      <div class="review-summary" id="review-summary"></div>
+      <div class="review-list" id="review-list"></div>
+    </div>
+    <div class="modal-foot">
+      <div class="modal-actions">
+        <button class="btn-ghost" onclick="closeReviewPanel()">Close</button>
+      </div>
+    </div>
   </div>
 </div>
 

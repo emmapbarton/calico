@@ -21,6 +21,7 @@ function updateAllSliderFills() {
    STATE
 ══════════════════════════════════════════ */
 const DEFAULT_STATE = {
+  stateVersion: 2,
   onboarded: false,
   baseline: 7,
   distribution: 'even',
@@ -39,24 +40,178 @@ const DEFAULT_STATE = {
   taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
   lastCheckinDate: null,
   pinnedAllocations: {}, // 'taskId|dateStr' → hours — drag/skip pinned
+  manualOverrides: {}, // occurrenceId → { pinned: {dateStr: hours}, excludedDates: [] }
 };
 
 let S = { ...DEFAULT_STATE };
 let editingId   = null;
 let editingType = null;
 let pickedColor = '#111111';
+let _loadRecoveryMessage = '';
+const _undoStack = [];
 
 /* ══════════════════════════════════════════
    PERSISTENCE
 ══════════════════════════════════════════ */
-function save() {
-  try { localStorage.setItem('calico_v1', JSON.stringify(S)); } catch(e) {}
+const STORAGE_KEY = 'calico_v2';
+const LEGACY_STORAGE_KEY = 'calico_v1';
+const STATE_VERSION = 2;
+
+function cloneData(value) {
+  return JSON.parse(JSON.stringify(value));
 }
+
+function finiteNumber(value, fallback, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeState(input) {
+  const raw = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const next = {
+    ...cloneData(DEFAULT_STATE),
+    ...raw,
+    stateVersion: STATE_VERSION,
+  };
+
+  next.baseline = finiteNumber(next.baseline, 7, 1, 10);
+  next.maxDailyHours = finiteNumber(next.maxDailyHours, 8, 0.5, 24);
+  next.weekOffset = Math.trunc(finiteNumber(next.weekOffset, 0, -520, 520));
+  next.tasks = Array.isArray(next.tasks) ? next.tasks.filter(Boolean) : [];
+  next.events = Array.isArray(next.events) ? next.events.filter(Boolean) : [];
+  next.intensities = next.intensities && typeof next.intensities === 'object' ? next.intensities : {};
+  next.intensityHistory = Array.isArray(next.intensityHistory) ? next.intensityHistory.slice(-30) : [];
+  next.taskLog = next.taskLog && typeof next.taskLog === 'object' ? next.taskLog : {};
+  next.dayCapOverrides = next.dayCapOverrides && typeof next.dayCapOverrides === 'object' ? next.dayCapOverrides : {};
+  next.taskOverworkAllowances = next.taskOverworkAllowances && typeof next.taskOverworkAllowances === 'object'
+    ? next.taskOverworkAllowances : {};
+  next.pinnedAllocations = next.pinnedAllocations && typeof next.pinnedAllocations === 'object'
+    ? next.pinnedAllocations : {};
+  next.manualOverrides = next.manualOverrides && typeof next.manualOverrides === 'object'
+    ? next.manualOverrides : {};
+  if (!['week', 'agenda', 'settings'].includes(next.view)) next.view = 'week';
+  if (!['even', 'front', 'back', 'weighted'].includes(next.distribution)) next.distribution = 'even';
+
+  // Migrate safe legacy pins for single-occurrence tasks. Repeating legacy
+  // pins are intentionally left alone because they cannot identify an occurrence.
+  Object.entries(next.pinnedAllocations).forEach(([key, hours]) => {
+    const splitAt = key.lastIndexOf('|');
+    if (splitAt < 0) return;
+    const taskId = key.slice(0, splitAt);
+    const dateStr = key.slice(splitAt + 1);
+    const task = next.tasks.find(t => t.id === taskId);
+    if (!task || (task.repeat && task.repeat !== 'none')) return;
+    if (!next.manualOverrides[taskId]) next.manualOverrides[taskId] = { pinned: {}, excludedDates: [] };
+    next.manualOverrides[taskId].pinned ||= {};
+    next.manualOverrides[taskId].pinned[dateStr] = finiteNumber(hours, 0, 0, 24);
+    delete next.pinnedAllocations[key];
+  });
+
+  Object.values(next.manualOverrides).forEach(override => {
+    override.pinned = override.pinned && typeof override.pinned === 'object' ? override.pinned : {};
+    override.excludedDates = Array.isArray(override.excludedDates)
+      ? Array.from(new Set(override.excludedDates.filter(Boolean))) : [];
+  });
+
+  return next;
+}
+
+function save() {
+  try {
+    S.stateVersion = STATE_VERSION;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    return true;
+  } catch (error) {
+    console.error('Calico could not save state', error);
+    showToast('Calico could not save. Export a backup before closing.');
+    return false;
+  }
+}
+
 function load() {
   try {
-    const raw = localStorage.getItem('calico_v1');
-    if (raw) S = { ...DEFAULT_STATE, ...JSON.parse(raw) };
-  } catch(e) {}
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) {
+      S = normalizeState(DEFAULT_STATE);
+      return;
+    }
+    S = normalizeState(JSON.parse(raw));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+  } catch (error) {
+    console.error('Calico state recovery', error);
+    try {
+      const broken = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (broken) localStorage.setItem(`calico_recovery_${Date.now()}`, broken);
+    } catch (_) {}
+    S = normalizeState(DEFAULT_STATE);
+    _loadRecoveryMessage = 'Saved data was damaged, so Calico opened a clean recovery state.';
+  }
+}
+
+function snapshotForUndo(label, state = S) {
+  _undoStack.push({ label, state: cloneData(state) });
+  if (_undoStack.length > 10) _undoStack.shift();
+  syncUndoButton();
+}
+
+function syncUndoButton() {
+  const btn = document.getElementById('undo-btn');
+  if (!btn) return;
+  btn.disabled = !_undoStack.length;
+  btn.title = _undoStack.length ? `Undo ${_undoStack[_undoStack.length - 1].label}` : 'Nothing to undo';
+}
+
+function undoLastAction() {
+  const previous = _undoStack.pop();
+  if (!previous) return;
+  S = normalizeState(previous.state);
+  invalidatePlan();
+  save();
+  render();
+  syncUndoButton();
+  showToast(`Undid ${previous.label}`);
+}
+
+function exportData() {
+  const payload = JSON.stringify({ exportedAt: new Date().toISOString(), state: S }, null, 2);
+  const blob = new Blob([payload], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `calico-backup-${ds(today())}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showToast('Backup exported');
+}
+
+function chooseImportFile() {
+  document.getElementById('import-data-file')?.click();
+}
+
+async function importDataFile(input) {
+  const file = input.files?.[0];
+  input.value = '';
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    const candidate = parsed.state || parsed;
+    if (!candidate || !Array.isArray(candidate.tasks) || !Array.isArray(candidate.events)) {
+      throw new Error('This is not a Calico backup.');
+    }
+    if (!confirm('Replace the current Calico data with this backup?')) return;
+    snapshotForUndo('data import');
+    S = normalizeState(candidate);
+    invalidatePlan();
+    save();
+    render();
+    showToast('Backup imported');
+  } catch (error) {
+    console.error('Calico import failed', error);
+    showToast(error.message || 'That backup could not be imported');
+  }
 }
 
 /* ══════════════════════════════════════════
@@ -413,6 +568,11 @@ function taskScopedOverworkFor(occ, dateStr) {
 }
 
 function pinnedHoursForOccurrence(occ, dateStr) {
+  const override = S.manualOverrides?.[occ.occId];
+  // Once an occurrence has a manual override, that record is authoritative.
+  // Do not fall through to stale legacy task-level pins.
+  if (override) return override.pinned?.[dateStr];
+
   if (!S.pinnedAllocations) return undefined;
 
   // New occurrence-scoped pin format for future use.
@@ -427,6 +587,10 @@ function pinnedHoursForOccurrence(occ, dateStr) {
   }
 
   return undefined;
+}
+
+function excludedDatesForOccurrence(occ) {
+  return new Set(S.manualOverrides?.[occ.occId]?.excludedDates || []);
 }
 
 /* ─── Step 4: Allocate each occurrence ──────────────────────── */
@@ -514,7 +678,7 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
   // Overwork is consumed locally for this occurrence and never becomes global
   // capacity for unrelated tasks.
   const allocation = {};
-  const excludedDays = new Set();
+  const excludedDays = excludedDatesForOccurrence(occ);
   const extraRemaining = {};
 
   const todayDate = today();
@@ -626,9 +790,10 @@ function batchCapacityForOccurrences(batch, remainingCapacity) {
     if (deadline < todayDate) return;
 
     let cur = new Date(winStart);
+    const excludedDays = excludedDatesForOccurrence(occ);
     while (cur <= deadline) {
       const dStr = ds(cur);
-      if (occurrenceCanAllocateOn(occ, dStr)) {
+      if (!excludedDays.has(dStr) && occurrenceCanAllocateOn(occ, dStr)) {
         if ((remainingCapacity[dStr] || 0) > 0.001) normalDays.add(dStr);
         const extra = taskScopedOverworkFor(occ, dStr);
         if (extra > 0.001) {
@@ -717,6 +882,7 @@ function conflictReasonForOccurrence(occ, result, free) {
   }
 
   if (!sawFreeDay) return 'event_blocked';
+  if (occ.priority === 'deferred' || occ.priority === 'bumped') return 'accepted_shortfall';
   if (conflictTypeForOccurrence(occ) === 'soft' && result.allocated < (+occ.hours || 0)) {
     return 'displaced_by_higher_priority';
   }
@@ -738,6 +904,7 @@ function allocateSchedule() {
     dayCapOverrides: S.dayCapOverrides,
     taskOverworkAllowances: S.taskOverworkAllowances,
     pinnedAllocations: S.pinnedAllocations,
+    manualOverrides: S.manualOverrides,
     taskLog: S.taskLog,
     distribution: S.distribution,
     dayStart: S.dayStart,
@@ -862,6 +1029,7 @@ function allocateSchedule() {
     allocations,
     occurrenceAllocations: occAllocs,
     occurrenceResults: occResults,
+    occurrences,
     conflicts,
     conflictsByTask: conflicts,
     conflictSummary,
@@ -1048,12 +1216,22 @@ function clearAllocCache() { invalidatePlan(); }
    COLOUR HELPERS
 ══════════════════════════════════════════ */
 function hexBg(hex, alpha) {
+  hex = safeColor(hex);
   const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
   return `rgba(${r},${g},${b},${alpha})`;
 }
 function isDark(hex) {
+  hex = safeColor(hex);
   const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
   return (r*299+g*587+b*114)/1000 < 128;
+}
+function safeColor(value, fallback = '#111111') {
+  return /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
+}
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[char]));
 }
 
 /* ══════════════════════════════════════════
@@ -1078,7 +1256,8 @@ function updateWeekLabel() {
 
 function syncNavButtons() {
   ['week','agenda','settings'].forEach(v => {
-    document.getElementById(`nav-${v}`).classList.toggle('active', S.view===v);
+    document.getElementById(`nav-${v}`)?.classList.toggle('active', S.view===v);
+    document.getElementById(`mb-${v}`)?.classList.toggle('active', S.view===v);
   });
   document.getElementById('sw-week')?.classList.toggle('active', S.view==='week');
   document.getElementById('sw-agenda')?.classList.toggle('active', S.view==='agenda');
@@ -1109,8 +1288,8 @@ function renderSidebar() {
     const rl  = t.repeat && t.repeat !== 'none' ? repeatLabel(t) : '';
     const el  = document.createElement('div');
     el.className = `sb-pill${conflict?.type === 'soft' ? ' needs-review' : ''}`;
-    el.innerHTML = `<span class="sb-dot" style="background:${t.color}"></span>
-      <span class="sb-name">${t.name}</span>
+    el.innerHTML = `<span class="sb-dot" style="background:${safeColor(t.color)}"></span>
+      <span class="sb-name">${escapeHtml(t.name)}</span>
       <span class="sb-hrs">${conflict?.type === 'soft' ? roundHours(conflict.shortfall) + 'h short' : (rl ? rl : rem + 'h')}</span>`;
     el.onclick = () => openModal('task', t.id);
     sbTasks.appendChild(el);
@@ -1123,8 +1302,8 @@ function renderSidebar() {
   S.events.forEach(e => {
     const el = document.createElement('div');
     el.className = 'sb-pill';
-    el.innerHTML = `<span class="sb-dot" style="background:${e.color}"></span>
-      <span class="sb-name">${e.name}</span>
+    el.innerHTML = `<span class="sb-dot" style="background:${safeColor(e.color)}"></span>
+      <span class="sb-name">${escapeHtml(e.name)}</span>
       <span class="sb-hrs">${e.date?.slice(5) ?? ''}</span>`;
     el.onclick = () => openModal('event', e.id);
     sbEvents.appendChild(el);
@@ -1149,8 +1328,8 @@ function renderReviewSidebar(plan = allocateSchedule()) {
     if (!task) return;
     const el = document.createElement('div');
     el.className = 'sb-pill review';
-    el.innerHTML = `<span class="sb-dot" style="background:${task.color || '#9b9b9b'}"></span>
-      <span class="sb-name">${task.name}</span>
+    el.innerHTML = `<span class="sb-dot" style="background:${safeColor(task.color, '#9b9b9b')}"></span>
+      <span class="sb-name">${escapeHtml(task.name)}</span>
       <span class="sb-hrs">${roundHours(info.shortfall)}h short</span>`;
     el.onclick = () => openReviewPanel(info.taskId);
     list.appendChild(el);
@@ -1314,7 +1493,7 @@ function renderWeek() {
 function makeWeekBlock(item, type, startH, hours, stackTop) {
   const block = document.createElement('div');
   block.className = `wk-block${item.priority==='optional'?' optional':''}`;
-  const color = item.color || '#111';
+  const color = safeColor(item.color);
   block.style.background = hexBg(color, 0.12);
   block.style.borderLeftColor = color;
   block.style.color = color;
@@ -1325,23 +1504,43 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
     const dur = Math.max(eh - sh, 0.25);
     block.style.top    = ((sh - 0) * 54) + 'px'; // 0 = GRID_START (midnight)
     block.style.height = (dur * 54) + 'px';
-    block.innerHTML = `<div class="wk-block-title">${item.name}</div>
+    block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>
       <div class="wk-block-sub">${item.start}–${item.end}</div>`;
   } else {
     block.style.top    = stackTop + 'px';
     block.style.height = (hours * 54) + 'px';
-    block.innerHTML = `<div class="wk-block-title">${item.name}</div>
+    block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>
       <div class="wk-block-sub">${Math.round(hours*10)/10}h</div>`;
   }
 
   if (type === 'task') {
+    const sourceDs = _currentRenderDStr;
     // Drag to reschedule
     block.draggable = true;
     block.dataset.taskId   = item.id;
-    block.dataset.sourceDs = arguments[3] !== undefined ? _currentRenderDStr : '';
-    block.dataset.hrs      = hours || 0;
+    block.dataset.sourceDs = sourceDs;
+    // A rendered day may contain several visual chunks around events. Moving
+    // any chunk moves the occurrence's full allocation for that day.
+    block.dataset.hrs      = taskHoursOnDay(item, sourceDs);
     block.addEventListener('dragstart', onTaskDragStart);
     block.addEventListener('click', e => { if (!e._wasDrag) openModal('task', item.id); });
+
+    const actions = document.createElement('div');
+    actions.className = 'wk-block-actions';
+    const done = !!S.taskLog[item.id + '|' + sourceDs]?.checked;
+    actions.innerHTML = `
+      <button type="button" class="wk-block-action${done ? ' active' : ''}" title="${done ? 'Mark not done' : 'Mark done'}">${done ? '✓' : '○'}</button>
+      <button type="button" class="wk-block-action" title="Skip and reallocate">→</button>`;
+    const [doneBtn, skipBtn] = actions.querySelectorAll('button');
+    doneBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      toggleTaskLog(item, sourceDs, taskHoursOnDay(item, sourceDs));
+    });
+    skipBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      skipTaskToTomorrow(item.id, sourceDs);
+    });
+    block.appendChild(actions);
   } else {
     block.onclick = () => openModal('event', item.id);
   }
@@ -1375,6 +1574,7 @@ function renderAgenda() {
 
     const dayEl = document.createElement('div');
     dayEl.className = 'ag-day';
+    dayEl.dataset.date = dStr;
     dayEl.innerHTML = `
       <div class="ag-day-head">
         <div class="ag-date">
@@ -1404,8 +1604,8 @@ function renderAgenda() {
         const strip = document.createElement('div');
         strip.className = 'ag-event-strip';
         strip.innerHTML = `
-          <span class="ag-strip-dot" style="background:${ev.color||'#111'}"></span>
-          <span class="ag-strip-name">${ev.name}</span>
+          <span class="ag-strip-dot" style="background:${safeColor(ev.color)}"></span>
+          <span class="ag-strip-name">${escapeHtml(ev.name)}</span>
           <span class="ag-strip-time">${ev.start}–${ev.end}</span>
           ${rl ? `<span class="repeat-badge">${rl}</span>` : ''}`;
         strip.onclick = () => openModal('event', ev.id);
@@ -1440,7 +1640,7 @@ function renderAgenda() {
         const notice = document.createElement('div');
         notice.className = 'ag-redist-notice';
         const hrs = missed.reduce((sum, t) => sum + taskHoursOnDay(t, dStr), 0);
-        const names = missed.map(t => t.name).join(', ');
+        const names = missed.map(t => escapeHtml(t.name)).join(', ');
         notice.innerHTML = `<span class="ag-redist-icon">↻</span>
           <span>${Math.round(hrs*10)/10}h from <strong>${names}</strong> redistributed to future days</span>`;
         dayEl.appendChild(notice);
@@ -1459,6 +1659,8 @@ function renderAgenda() {
 
     body.appendChild(dayEl);
   });
+
+  requestAnimationFrame(initAgendaDragTargets);
 }
 
 function repeatLabel(ev) {
@@ -1479,19 +1681,24 @@ function makeAgendaTaskRow(task, dStr) {
   const isMissed = isPast && !isDone;
 
   el.className = `ag-task-row${task.priority==='optional'?' optional':''}${isDone?' completed':''}${isMissed?' missed':''}`;
-  const color = task.color || '#111';
+  const color = safeColor(task.color);
   el.style.setProperty('--task-color', color);
 
   const hrs = taskHoursOnDay(task, dStr);
   const avg = task.hours / Math.max(1, daysRemaining(task));
+  const conflict = allocateSchedule().conflicts?.[task.id];
   let redistBadge = '';
-  if (!isPast) {
+  if (conflict?.type === 'soft') {
+    redistBadge = `<span class="badge badge-reduced">${roundHours(conflict.shortfall)}h unscheduled</span>`;
+  } else if (!isPast) {
     if (hrs < avg * 0.85) redistBadge = `<span class="badge badge-reduced">↓ reduced</span>`;
     else if (hrs > avg * 1.15) redistBadge = `<span class="badge badge-extra">↑ extra</span>`;
   }
 
   const taskRl    = repeatLabel(task);
-  const priBadge  = task.priority === 'optional' ? `<span class="badge badge-opt">optional</span>` : '';
+  const priBadge  = task.priority === 'optional'
+    ? `<span class="badge badge-opt">optional</span>`
+    : task.priority === 'deferred' ? `<span class="badge badge-opt">deferred</span>` : '';
   const mandBadge = task.priority === 'mandatory' ? `<span class="badge">mandatory</span>` : '';
   const statusBadge = isDone
     ? `<span class="badge badge-done">done</span>`
@@ -1501,38 +1708,54 @@ function makeAgendaTaskRow(task, dStr) {
     ? `<div class="ag-task-hrs crossed">${hrs}h</div>`
     : `<div class="ag-task-hrs">${hrs}h</div>`;
 
-  const checkbox = isPast
-    ? `<div class="ag-task-check">${isDone ? '✓' : ''}</div>`
-    : '';
+  const checkbox = `<button type="button" class="ag-task-check" title="${isDone ? 'Mark not done' : 'Mark done'}">${isDone ? '✓' : ''}</button>`;
 
   el.innerHTML = `
     ${checkbox}
     <div class="ag-task-accent"></div>
-    <div class="ag-task-name">${task.name}</div>
+    <div class="ag-task-name">${escapeHtml(task.name)}</div>
     <div class="ag-task-badges">
       ${mandBadge}${priBadge}${statusBadge}${redistBadge}
       ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
     </div>
     ${hrsDisplay}`;
 
-  if (isPast) {
-    el.addEventListener('click', e => {
-      e.stopPropagation();
-      toggleTaskLog(task, dStr, hrs);
-    });
-  } else {
-    // Add skip button for today and future days
+  const checkBtn = el.querySelector('.ag-task-check');
+  checkBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    toggleTaskLog(task, dStr, hrs);
+  });
+
+  if (!isPast) {
+    el.draggable = true;
+    el.dataset.taskId = task.id;
+    el.dataset.sourceDs = dStr;
+    el.dataset.hrs = hrs;
+    el.addEventListener('dragstart', onTaskDragStart);
+
     const skipBtn = document.createElement('button');
     skipBtn.className = 'ag-skip-btn';
     skipBtn.textContent = 'Skip →';
-    skipBtn.title = 'Move to tomorrow';
+    skipBtn.title = 'Reallocate this work to later eligible days';
     skipBtn.addEventListener('click', e => {
       e.stopPropagation();
       skipTaskToTomorrow(task.id, dStr);
     });
     el.appendChild(skipBtn);
-    el.addEventListener('click', () => openModal('task', task.id));
+
+    if (hasManualOverrideForTaskDate(task.id, dStr)) {
+      const autoBtn = document.createElement('button');
+      autoBtn.className = 'ag-skip-btn';
+      autoBtn.textContent = 'Auto';
+      autoBtn.title = 'Remove manual scheduling choices for this occurrence';
+      autoBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        returnTaskToAuto(task.id, dStr);
+      });
+      el.appendChild(autoBtn);
+    }
   }
+  el.addEventListener('click', () => openModal('task', task.id));
   return el;
 }
 
@@ -1548,6 +1771,7 @@ function toggleTaskLog(task, dStr, scheduledHrs) {
   }
   clearAllocCache();
   save(); render();
+  showToast(S.taskLog[key].checked ? 'Marked done' : 'Marked not done');
 }
 
 function makeAgendaEntry(item, type, dStr) {
@@ -1744,7 +1968,7 @@ function buildDemoteList() {
     const item = document.createElement('div');
     item.className = 'copt-task-item';
     item.innerHTML = `<div class="copt-check"></div>
-      <div class="copt-task-name">${t.name}</div>
+      <div class="copt-task-name">${escapeHtml(t.name)}</div>
       <div class="copt-task-hrs">${t.hours}h</div>`;
     item.addEventListener('click', e => {
       e.stopPropagation();
@@ -2017,7 +2241,9 @@ function openReviewPanel(taskId) {
     const scheduled = roundHours(info.allocated || 0);
     const needed = roundHours(info.needed || task.hours);
     const shortfall = roundHours(info.shortfall || 0);
-    const reason = info.reason === 'displaced_by_higher_priority'
+    const reason = info.reason === 'accepted_shortfall'
+      ? 'Saved with hours intentionally left unscheduled'
+      : info.reason === 'displaced_by_higher_priority'
       ? 'Lower priority than scheduled work'
       : info.reason === 'event_blocked'
         ? 'Blocked by events'
@@ -2025,9 +2251,9 @@ function openReviewPanel(taskId) {
 
     card.innerHTML = `
       <div class="review-item-head">
-        <span class="sb-dot" style="background:${task.color || '#9b9b9b'}"></span>
+        <span class="sb-dot" style="background:${safeColor(task.color, '#9b9b9b')}"></span>
         <div class="review-title-wrap">
-          <div class="review-title">${task.name}</div>
+          <div class="review-title">${escapeHtml(task.name)}</div>
           <div class="review-reason">${reason}</div>
         </div>
         <span class="review-badge">${shortfall}h short</span>
@@ -2083,8 +2309,14 @@ function showOverloadToast(msg) {
   const el = document.createElement('div');
   el.id = 'overload-toast';
   el.className = 'overload-toast';
-  el.innerHTML = `<span class="overload-toast-text">${msg}</span>
-    <button onclick="this.parentElement.remove()">✕</button>`;
+  const text = document.createElement('span');
+  text.className = 'overload-toast-text';
+  text.textContent = msg;
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.textContent = '✕';
+  close.onclick = () => el.remove();
+  el.append(text, close);
   document.body.appendChild(el);
   // Auto-dismiss after 8s
   setTimeout(() => { if (el.parentNode) el.remove(); }, 8000);
@@ -2155,9 +2387,12 @@ function saveWorkingHours() {
 }
 
 function resetData() {
-  if (!confirm('Clear all tasks, events and intensity data? This cannot be undone.')) return;
+  if (!confirm('Clear all tasks, events and intensity data? You can undo this until the page closes.')) return;
+  snapshotForUndo('clear all data');
   S.tasks = []; S.events = []; S.intensities = {}; S.intensityHistory = [];
-  S.taskLog = {}; S.pinnedAllocations = {}; S.dayCapOverrides = {}; S.taskOverworkAllowances = {};
+  S.taskLog = {}; S.pinnedAllocations = {}; S.manualOverrides = {};
+  S.dayCapOverrides = {}; S.taskOverworkAllowances = {};
+  invalidatePlan();
   save(); render();
   showToast('Data cleared');
 }
@@ -2416,6 +2651,11 @@ function _commitTask(obj, eid) {
       if (k.startsWith(obj.id + '|')) delete S.pinnedAllocations[k];
     });
   }
+  if (eid && S.manualOverrides) {
+    Object.keys(S.manualOverrides).forEach(key => {
+      if (key === eid || key.startsWith(eid + '|occ|')) delete S.manualOverrides[key];
+    });
+  }
 
   if (eid) {
     const i = S.tasks.findIndex(x => x.id === eid);
@@ -2429,8 +2669,17 @@ function _commitTask(obj, eid) {
 
 function deleteItem() {
   if (!editingId) return;
+  const item = S.tasks.find(x => x.id === editingId) || S.events.find(x => x.id === editingId);
+  if (!item || !confirm(`Delete "${item.name || 'this item'}"?`)) return;
+  snapshotForUndo(`delete ${item.name || 'item'}`);
   S.tasks  = S.tasks.filter(x=>x.id!==editingId);
   S.events = S.events.filter(x=>x.id!==editingId);
+  if (S.manualOverrides) {
+    Object.keys(S.manualOverrides).forEach(key => {
+      if (key === editingId || key.startsWith(editingId + '|occ|')) delete S.manualOverrides[key];
+    });
+  }
+  invalidatePlan();
   document.getElementById('modal-bg').classList.add('hidden');
   editingId = null;
   save(); render();
@@ -2550,7 +2799,7 @@ let _dragHrs      = 0;
 
 function onTaskDragStart(e) {
   _dragTaskId   = e.currentTarget.dataset.taskId;
-  _dragSourceDs = _currentRenderDStr;
+  _dragSourceDs = e.currentTarget.dataset.sourceDs;
   _dragHrs      = parseFloat(e.currentTarget.dataset.hrs) || 0;
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', _dragTaskId);
@@ -2571,31 +2820,158 @@ function initWeekDragTargets() {
       col.classList.remove('drag-over');
       const targetDs = col.dataset.date;
       if (!targetDs || !_dragTaskId || targetDs === _dragSourceDs) return;
-      pinTaskToDay(_dragTaskId, _dragSourceDs, targetDs, _dragHrs);
+      moveTaskAllocation(_dragTaskId, _dragSourceDs, targetDs, _dragHrs);
     });
   });
 }
 
-function pinTaskToDay(taskId, fromDs, toDs, hrs) {
-  if (!S.pinnedAllocations) S.pinnedAllocations = {};
-  // Remove old pin from source day
-  const fromKey = taskId + '|' + fromDs;
-  const toKey   = taskId + '|' + toDs;
-  delete S.pinnedAllocations[fromKey];
-  // Pin to new day
-  S.pinnedAllocations[toKey] = hrs;
-  clearAllocCache();
-  save(); render();
-  // Re-init drag targets after re-render
-  requestAnimationFrame(initWeekDragTargets);
-  showToast('Task moved to ' + toDs);
+function initAgendaDragTargets() {
+  document.querySelectorAll('.ag-day').forEach(day => {
+    day.addEventListener('dragover', event => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      day.classList.add('drag-over');
+    });
+    day.addEventListener('dragleave', () => day.classList.remove('drag-over'));
+    day.addEventListener('drop', event => {
+      event.preventDefault();
+      day.classList.remove('drag-over');
+      const targetDs = day.dataset.date;
+      if (!targetDs || !_dragTaskId || targetDs === _dragSourceDs) return;
+      moveTaskAllocation(_dragTaskId, _dragSourceDs, targetDs, _dragHrs);
+    });
+  });
+}
+
+function occurrenceForTaskDate(taskId, dateStr, plan = allocateSchedule()) {
+  return (plan.occurrences || []).find(occ => (
+    occ.taskId === taskId &&
+    (plan.occurrenceAllocations?.[occ.occId]?.[dateStr] || 0) > ALLOC_PROGRESS_EPSILON
+  )) || null;
+}
+
+function hasManualOverrideForTaskDate(taskId, dateStr, plan = allocateSchedule()) {
+  const occ = occurrenceForTaskDate(taskId, dateStr, plan);
+  return !!(occ && S.manualOverrides?.[occ.occId]);
+}
+
+function ensureManualOverride(occId) {
+  if (!S.manualOverrides) S.manualOverrides = {};
+  if (!S.manualOverrides[occId]) {
+    S.manualOverrides[occId] = { pinned: {}, excludedDates: [] };
+  }
+  const override = S.manualOverrides[occId];
+  override.pinned ||= {};
+  override.excludedDates = Array.isArray(override.excludedDates) ? override.excludedDates : [];
+  return override;
+}
+
+function restoreManualOverrides(previous) {
+  S.manualOverrides = previous;
+  invalidatePlan();
+}
+
+function verifyManualOverride(occ, sourceDate, targetDate, requestedHours, beforePlan) {
+  invalidatePlan();
+  const afterPlan = allocateSchedule();
+  const before = beforePlan.occurrenceResults?.[occ.occId] || { allocated: 0, fullyAllocated: false };
+  const after = afterPlan.occurrenceResults?.[occ.occId] || { allocated: 0, fullyAllocated: false };
+  const sourceHours = afterPlan.occurrenceAllocations?.[occ.occId]?.[sourceDate] || 0;
+  const targetHours = targetDate
+    ? afterPlan.occurrenceAllocations?.[occ.occId]?.[targetDate] || 0
+    : 0;
+
+  const preserved = after.allocated + ALLOC_EPSILON >= before.allocated;
+  const sourceCleared = sourceHours <= ALLOC_EPSILON;
+  const targetSatisfied = !targetDate || targetHours + ALLOC_EPSILON >= requestedHours;
+  return { valid: preserved && sourceCleared && targetSatisfied, afterPlan };
+}
+
+function moveTaskAllocation(taskId, fromDs, toDs, hrs) {
+  const beforePlan = allocateSchedule();
+  const occ = occurrenceForTaskDate(taskId, fromDs, beforePlan);
+  if (!occ) {
+    showToast('That scheduled block could not be found');
+    return false;
+  }
+  if (parseDate(toDs) < today() || parseDate(toDs) < parseDate(occ.windowStart) || parseDate(toDs) > parseDate(occ.deadline)) {
+    showToast(`Move it between ${fmt(parseDate(occ.windowStart))} and ${fmt(parseDate(occ.deadline))}`);
+    return false;
+  }
+  if (!occurrenceCanAllocateOn(occ, toDs)) {
+    showToast('That occurrence cannot be scheduled on this day');
+    return false;
+  }
+
+  const previous = cloneData(S.manualOverrides || {});
+  const override = ensureManualOverride(occ.occId);
+  delete override.pinned[fromDs];
+  override.excludedDates = Array.from(new Set([...override.excludedDates, fromDs]));
+  override.excludedDates = override.excludedDates.filter(d => d !== toDs);
+  override.pinned[toDs] = roundHours((override.pinned[toDs] || 0) + hrs);
+
+  const verification = verifyManualOverride(occ, fromDs, toDs, hrs, beforePlan);
+  if (!verification.valid) {
+    restoreManualOverrides(previous);
+    showToast('That move would leave work unscheduled, so Calico kept the current plan');
+    return false;
+  }
+
+  snapshotForUndo('task move', { ...S, manualOverrides: previous });
+  save();
+  render();
+  showToast(`Moved to ${fmt(parseDate(toDs))}`);
+  return true;
 }
 
 function skipTaskToTomorrow(taskId, dStr) {
-  const hrs     = taskHoursOnDay(S.tasks.find(t => t.id === taskId), dStr);
-  const tomorrow = ds(addDays(parseDate(dStr), 1));
-  pinTaskToDay(taskId, dStr, tomorrow, hrs);
-  showToast('Skipped to tomorrow');
+  const beforePlan = allocateSchedule();
+  const occ = occurrenceForTaskDate(taskId, dStr, beforePlan);
+  if (!occ) {
+    showToast('That scheduled work could not be found');
+    return false;
+  }
+
+  const previous = cloneData(S.manualOverrides || {});
+  const override = ensureManualOverride(occ.occId);
+  delete override.pinned[dStr];
+  override.excludedDates = Array.from(new Set([...override.excludedDates, dStr]));
+
+  const verification = verifyManualOverride(
+    occ,
+    dStr,
+    null,
+    beforePlan.occurrenceAllocations?.[occ.occId]?.[dStr] || 0,
+    beforePlan
+  );
+  if (!verification.valid) {
+    restoreManualOverrides(previous);
+    const deadline = fmt(parseDate(occ.deadline));
+    showToast(`No later capacity before ${deadline}; the task was not skipped`);
+    return false;
+  }
+
+  snapshotForUndo('task skip', { ...S, manualOverrides: previous });
+  save();
+  render();
+  showToast('Skipped and reallocated before the deadline');
+  return true;
+}
+
+function returnTaskToAuto(taskId, dStr) {
+  const plan = allocateSchedule();
+  const occ = occurrenceForTaskDate(taskId, dStr, plan)
+    || (plan.occurrences || []).find(candidate => candidate.taskId === taskId && S.manualOverrides?.[candidate.occId]);
+  if (!occ || !S.manualOverrides?.[occ.occId]) {
+    showToast('This task is already using automatic scheduling');
+    return;
+  }
+  snapshotForUndo('return to automatic scheduling');
+  delete S.manualOverrides[occ.occId];
+  invalidatePlan();
+  save();
+  render();
+  showToast('Returned to automatic scheduling');
 }
 
 /* ══════════════════════════════════════════
@@ -2641,8 +3017,8 @@ function maybeShowCheckin() {
     item.innerHTML = `
       <div class="ci-row">
         <div class="ci-check" onclick="toggleCheckinItem(this)">${completed >= hrs ? '✓' : ''}</div>
-        <div class="ci-accent" style="background:${task.color||'#111'}"></div>
-        <div class="ci-name">${task.name}</div>
+        <div class="ci-accent" style="background:${safeColor(task.color)}"></div>
+        <div class="ci-name">${escapeHtml(task.name)}</div>
         <div class="ci-scheduled">${hrs}h scheduled</div>
       </div>
       <div class="ci-partial ${completed >= hrs ? 'hidden' : ''}">
@@ -2751,4 +3127,9 @@ if (S.onboarded) {
   document.getElementById('onboarding').classList.remove('hidden');
   document.getElementById('app').classList.add('hidden');
   render();
+}
+
+syncUndoButton();
+if (_loadRecoveryMessage) {
+  setTimeout(() => showToast(_loadRecoveryMessage), 0);
 }

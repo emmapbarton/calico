@@ -1,0 +1,7 @@
+{
+  "name": "calico",
+  "private": true,
+  "scripts": {
+    "test": "node tests/alpha-smoke.mjs"
+  }
+}

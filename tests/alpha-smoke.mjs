@@ -310,6 +310,36 @@ test('completion state exposes the same action in every view', () => {
   });
 });
 
+test('week task blocks render completion controls without a scope error', () => {
+  const oldCreateElement = document.createElement;
+  const buttonStub = { addEventListener() {} };
+  const blockStub = {
+    className: '',
+    classList: { toggle() {} },
+    style: {},
+    dataset: {},
+    draggable: false,
+    innerHTML: '',
+    addEventListener() {},
+    appendChild() {},
+  };
+  const actionsStub = {
+    className: '',
+    innerHTML: '',
+    querySelectorAll() { return [buttonStub, buttonStub, buttonStub]; },
+  };
+  document.createElement = tag => tag === 'div' && !blockStub.className ? blockStub : actionsStub;
+  try {
+    const task = makeTask('week-render', 2, 0);
+    resetState({ tasks: [task] });
+    const block = makeWeekBlock(task, 'task', ds(today()), 2, 0);
+    assert.equal(block, blockStub);
+    assert.match(actionsStub.innerHTML, /Mark done/);
+  } finally {
+    document.createElement = oldCreateElement;
+  }
+});
+
 test('stress 1: twenty repeated drags never change the requested total', () => {
   resetState({ maxDailyHours: 8, tasks: [makeTask('drag-loop', 10, 4)] });
   withInteractionStubs(() => {

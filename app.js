@@ -108,6 +108,9 @@ function normalizeState(input) {
 
   Object.values(next.manualOverrides).forEach(override => {
     override.pinned = override.pinned && typeof override.pinned === 'object' ? override.pinned : {};
+    Object.entries(override.pinned).forEach(([dateStr, hours]) => {
+      override.pinned[dateStr] = finiteNumber(hours, 0, 0, 24);
+    });
     override.excludedDates = Array.isArray(override.excludedDates)
       ? Array.from(new Set(override.excludedDates.filter(Boolean))) : [];
   });
@@ -577,6 +580,14 @@ function excludedDatesForOccurrence(occ) {
   return new Set(S.manualOverrides?.[occ.occId]?.excludedDates || []);
 }
 
+function occurrenceHasUserConstraints(occ) {
+  const override = S.manualOverrides?.[occ.occId];
+  return !!override && (
+    Object.keys(override.pinned || {}).length > 0 ||
+    (override.excludedDates || []).length > 0
+  );
+}
+
 /* ─── Step 4: Allocate each occurrence ──────────────────────── */
 const ALLOC_EPSILON = 0.05;
 const ALLOC_PROGRESS_EPSILON = 0.01;
@@ -865,6 +876,7 @@ function conflictReasonForOccurrence(occ, result, free) {
     cur = addDays(cur, 1);
   }
 
+  if (occurrenceHasUserConstraints(occ)) return 'user_constraints';
   if (!sawFreeDay) return 'event_blocked';
   if (occ.priority === 'deferred' || occ.priority === 'bumped') return 'accepted_shortfall';
   if (conflictTypeForOccurrence(occ) === 'soft' && result.allocated < (+occ.hours || 0)) {
@@ -1477,8 +1489,10 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
   } else {
     block.style.top    = stackTop + 'px';
     block.style.height = (hours * 54) + 'px';
+    const isFixed = hasManualOverrideForTaskDate(item.id, sourceDs);
+    block.classList.toggle('user-fixed', isFixed);
     block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>
-      <div class="wk-block-sub">${Math.round(hours*10)/10}h</div>`;
+      <div class="wk-block-sub">${Math.round(hours*10)/10}h${isFixed ? ' · fixed' : ''}</div>`;
   }
 
   if (type === 'task') {
@@ -1497,11 +1511,16 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     const done = !!S.taskLog[item.id + '|' + sourceDs]?.checked;
     actions.innerHTML = `
       <button type="button" class="wk-block-action${done ? ' active' : ''}" title="${done ? 'Mark not done' : 'Mark done'}">${done ? '✓' : '○'}</button>
+      <button type="button" class="wk-block-action" title="Adjust hours for this day">±</button>
       <button type="button" class="wk-block-action" title="Skip and reallocate">→</button>`;
-    const [doneBtn, skipBtn] = actions.querySelectorAll('button');
+    const [doneBtn, adjustBtn, skipBtn] = actions.querySelectorAll('button');
     doneBtn.addEventListener('click', e => {
       e.stopPropagation();
       toggleTaskLog(item, sourceDs, taskHoursOnDay(item, sourceDs));
+    });
+    adjustBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      openDayHoursEditor(item.id, sourceDs);
     });
     skipBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -1670,6 +1689,8 @@ function makeAgendaTaskRow(task, dStr) {
   const statusBadge = isDone
     ? `<span class="badge badge-done">done</span>`
     : isMissed ? `<span class="badge badge-missed">missed</span>` : '';
+  const fixedBadge = hasManualOverrideForTaskDate(task.id, dStr)
+    ? `<span class="badge badge-fixed">fixed</span>` : '';
 
   const hrsDisplay = isDone
     ? `<div class="ag-task-hrs crossed">${hrs}h</div>`
@@ -1682,7 +1703,7 @@ function makeAgendaTaskRow(task, dStr) {
     <div class="ag-task-accent"></div>
     <div class="ag-task-name">${escapeHtml(task.name)}</div>
     <div class="ag-task-badges">
-      ${mandBadge}${priBadge}${statusBadge}${redistBadge}
+      ${mandBadge}${priBadge}${statusBadge}${fixedBadge}${redistBadge}
       ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
     </div>
     ${hrsDisplay}`;
@@ -1710,14 +1731,24 @@ function makeAgendaTaskRow(task, dStr) {
     });
     el.appendChild(skipBtn);
 
+    const adjustBtn = document.createElement('button');
+    adjustBtn.className = 'ag-skip-btn';
+    adjustBtn.textContent = 'Adjust';
+    adjustBtn.title = 'Fix a different number of hours on this day';
+    adjustBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      openDayHoursEditor(task.id, dStr);
+    });
+    el.appendChild(adjustBtn);
+
     if (hasManualOverrideForTaskDate(task.id, dStr)) {
       const autoBtn = document.createElement('button');
       autoBtn.className = 'ag-skip-btn';
       autoBtn.textContent = 'Auto';
-      autoBtn.title = 'Remove manual scheduling choices for this occurrence';
+      autoBtn.title = 'Return this day to automatic scheduling';
       autoBtn.addEventListener('click', e => {
         e.stopPropagation();
-        returnTaskToAuto(task.id, dStr);
+        returnTaskDayToAuto(task.id, dStr);
       });
       el.appendChild(autoBtn);
     }
@@ -2068,6 +2099,16 @@ function verifyConflictResolution(selected, baseTask, editId) {
     invalidatePlan();
     const proposedTask = applyConflictSelectionToState(selected, baseTask, editId);
     if (!proposedTask) return { ok: false, message: 'Please complete the selected option.' };
+    const fixedHours = maximumFixedHoursForTask(proposedTask.id);
+    if (fixedHours > proposedTask.hours + ALLOC_EPSILON) {
+      return {
+        ok: false,
+        shortfall: 0,
+        hardConflicts: [],
+        proposedTask,
+        message: `This task has ${fixedHours}h fixed across one occurrence. Adjust those days before reducing the total estimate.`,
+      };
+    }
 
     const plan = allocateSchedule();
     const conflict = plan.conflicts?.[proposedTask.id];
@@ -2365,6 +2406,50 @@ function onTypeChange() {
   document.getElementById('event-fields').classList.toggle('hidden', type !== 'event');
 }
 
+function manualOverrideKeysForTask(taskId) {
+  return Object.keys(S.manualOverrides || {}).filter(key => (
+    key === taskId || key.startsWith(taskId + '|occ|')
+  ));
+}
+
+function maximumFixedHoursForTask(taskId) {
+  return manualOverrideKeysForTask(taskId).reduce((maximum, key) => {
+    const override = S.manualOverrides[key] || {};
+    const fixed = Object.values(override.pinned || {})
+      .reduce((sum, hours) => sum + Math.max(0, +hours || 0), 0);
+    return Math.max(maximum, roundHours(fixed));
+  }, 0);
+}
+
+function updateTaskManualControls(taskId) {
+  const controls = document.getElementById('task-manual-controls');
+  if (!controls) return;
+  const keys = taskId ? manualOverrideKeysForTask(taskId) : [];
+  const dayCount = keys.reduce((count, key) => {
+    const override = S.manualOverrides[key] || {};
+    return count + new Set([
+      ...Object.keys(override.pinned || {}),
+      ...(override.excludedDates || []),
+    ]).size;
+  }, 0);
+  controls.classList.toggle('hidden', dayCount === 0);
+  document.getElementById('task-manual-summary').textContent =
+    `${dayCount} day${dayCount === 1 ? '' : 's'} fixed by you. Calico will not change them automatically.`;
+}
+
+function returnEditedTaskToAuto() {
+  if (!editingId) return;
+  const keys = manualOverrideKeysForTask(editingId);
+  if (!keys.length) return;
+  snapshotForUndo('return task to automatic scheduling');
+  keys.forEach(key => delete S.manualOverrides[key]);
+  invalidatePlan();
+  save();
+  render();
+  updateTaskManualControls(editingId);
+  showToast('All days for this task are automatic again');
+}
+
 function openModal(type, id) {
   editingId   = id ?? null;
   editingType = type;
@@ -2451,6 +2536,7 @@ function openModal(type, id) {
     document.querySelectorAll('input[name="trday"]').forEach(cb => { cb.checked = false; });
   }
 
+  updateTaskManualControls(type === 'task' ? id : null);
   syncColourPicker();
   document.getElementById('modal-bg').classList.remove('hidden');
   document.getElementById('f-name').focus();
@@ -2500,6 +2586,12 @@ function saveItem() {
       if (repeatVal === 'interval') {
         obj.repeatInterval = parseInt(document.getElementById('f-task-interval').value) || 7;
       }
+    }
+
+    const fixedHours = editingId ? maximumFixedHoursForTask(editingId) : 0;
+    if (fixedHours > obj.hours + ALLOC_EPSILON) {
+      showToast(`This task has ${fixedHours}h fixed across one occurrence. Release or reduce those days first.`);
+      return;
     }
 
     // Check conflict before committing
@@ -2568,12 +2660,6 @@ function _commitTask(obj, eid) {
     });
   }
 
-  if (eid && S.manualOverrides) {
-    Object.keys(S.manualOverrides).forEach(key => {
-      if (key === eid || key.startsWith(eid + '|occ|')) delete S.manualOverrides[key];
-    });
-  }
-
   if (eid) {
     const i = S.tasks.findIndex(x => x.id === eid);
     if (i >= 0) { obj.logged = S.tasks[i].logged ?? 0; S.tasks[i] = obj; }
@@ -2582,6 +2668,21 @@ function _commitTask(obj, eid) {
     S.tasks.push(obj);
   }
   invalidatePlan();
+
+  // Preserve user-authored day constraints across ordinary task edits. If the
+  // recurrence itself changed, discard only constraints whose occurrence no
+  // longer exists.
+  if (eid && S.manualOverrides) {
+    const validOccurrenceIds = new Set(
+      (allocateSchedule().occurrences || [])
+        .filter(occ => occ.taskId === eid)
+        .map(occ => occ.occId)
+    );
+    manualOverrideKeysForTask(eid).forEach(key => {
+      if (!validOccurrenceIds.has(key)) delete S.manualOverrides[key];
+    });
+    invalidatePlan();
+  }
 }
 
 function deleteItem() {
@@ -2617,6 +2718,7 @@ document.addEventListener('click', function(e) {
   if (e.target.id === 'modal-bg') closeModal();
   if (e.target.id === 'conflict-bg') closeConflict();
   if (e.target.id === 'review-bg') closeReviewPanel();
+  if (e.target.id === 'day-hours-bg') closeDayHoursEditor();
 });
 
 /* ══════════════════════════════════════════
@@ -2760,15 +2862,39 @@ function initAgendaDragTargets() {
 }
 
 function occurrenceForTaskDate(taskId, dateStr, plan = allocateSchedule()) {
-  return (plan.occurrences || []).find(occ => (
+  const occurrences = plan.occurrences || [];
+  const allocated = occurrences.find(occ => (
     occ.taskId === taskId &&
     (plan.occurrenceAllocations?.[occ.occId]?.[dateStr] || 0) > ALLOC_PROGRESS_EPSILON
-  )) || null;
+  ));
+  if (allocated) return allocated;
+
+  const constrained = occurrences.find(occ => {
+    if (occ.taskId !== taskId) return false;
+    const override = S.manualOverrides?.[occ.occId];
+    return override && (
+      Object.prototype.hasOwnProperty.call(override.pinned || {}, dateStr) ||
+      (override.excludedDates || []).includes(dateStr)
+    );
+  });
+  if (constrained) return constrained;
+
+  return occurrences.find(occ => {
+    if (occ.taskId !== taskId) return false;
+    const start = parseDate(occ.notBefore || occ.windowStart);
+    const date = parseDate(dateStr);
+    return date >= start && date <= parseDate(occ.deadline) && occurrenceCanAllocateOn(occ, dateStr);
+  }) || null;
 }
 
 function hasManualOverrideForTaskDate(taskId, dateStr, plan = allocateSchedule()) {
   const occ = occurrenceForTaskDate(taskId, dateStr, plan);
-  return !!(occ && S.manualOverrides?.[occ.occId]);
+  if (!occ) return false;
+  const override = S.manualOverrides?.[occ.occId];
+  return !!override && (
+    Object.prototype.hasOwnProperty.call(override.pinned || {}, dateStr) ||
+    (override.excludedDates || []).includes(dateStr)
+  );
 }
 
 function ensureManualOverride(occId) {
@@ -2782,25 +2908,84 @@ function ensureManualOverride(occId) {
   return override;
 }
 
-function restoreManualOverrides(previous) {
-  S.manualOverrides = previous;
-  invalidatePlan();
+function cleanupManualOverride(occId) {
+  const override = S.manualOverrides?.[occId];
+  if (!override) return;
+  override.pinned ||= {};
+  override.excludedDates = Array.isArray(override.excludedDates) ? override.excludedDates : [];
+  if (!Object.keys(override.pinned).length && !override.excludedDates.length) {
+    delete S.manualOverrides[occId];
+  }
 }
 
-function verifyManualOverride(occ, sourceDate, targetDate, requestedHours, beforePlan) {
-  invalidatePlan();
-  const afterPlan = allocateSchedule();
-  const before = beforePlan.occurrenceResults?.[occ.occId] || { allocated: 0, fullyAllocated: false };
-  const after = afterPlan.occurrenceResults?.[occ.occId] || { allocated: 0, fullyAllocated: false };
-  const sourceHours = afterPlan.occurrenceAllocations?.[occ.occId]?.[sourceDate] || 0;
-  const targetHours = targetDate
-    ? afterPlan.occurrenceAllocations?.[occ.occId]?.[targetDate] || 0
-    : 0;
+function constraintHoursForDate(occ, dateStr) {
+  const override = S.manualOverrides?.[occ.occId];
+  if (!override) return undefined;
+  if ((override.excludedDates || []).includes(dateStr)) return 0;
+  if (Object.prototype.hasOwnProperty.call(override.pinned || {}, dateStr)) {
+    return roundHours(override.pinned[dateStr]);
+  }
+  return undefined;
+}
 
-  const preserved = after.allocated + ALLOC_EPSILON >= before.allocated;
-  const sourceCleared = sourceHours <= ALLOC_EPSILON;
-  const targetSatisfied = !targetDate || targetHours + ALLOC_EPSILON >= requestedHours;
-  return { valid: preserved && sourceCleared && targetSatisfied, afterPlan };
+function constrainedDatesForOccurrence(occ) {
+  const override = S.manualOverrides?.[occ.occId];
+  if (!override) return [];
+  return Array.from(new Set([
+    ...Object.keys(override.pinned || {}),
+    ...(override.excludedDates || []),
+  ])).sort();
+}
+
+function setDayConstraint(occ, dateStr, hours) {
+  const override = ensureManualOverride(occ.occId);
+  const value = roundHours(Math.max(0, +hours || 0));
+  delete override.pinned[dateStr];
+  override.excludedDates = override.excludedDates.filter(date => date !== dateStr);
+  if (value <= ALLOC_PROGRESS_EPSILON) {
+    override.excludedDates.push(dateStr);
+  } else {
+    override.pinned[dateStr] = value;
+  }
+}
+
+function releaseDayConstraint(occ, dateStr) {
+  const override = S.manualOverrides?.[occ.occId];
+  if (!override) return;
+  delete override.pinned?.[dateStr];
+  override.excludedDates = (override.excludedDates || []).filter(date => date !== dateStr);
+  cleanupManualOverride(occ.occId);
+}
+
+function manualConstraintResult(occ, plan = allocateSchedule()) {
+  const result = plan.occurrenceResults?.[occ.occId] || {
+    allocated: 0,
+    shortfall: occ.hours,
+    fullyAllocated: false,
+  };
+  return {
+    plan,
+    allocated: roundHours(result.allocated || 0),
+    shortfall: roundHours(result.shortfall || 0),
+    fullyAllocated: !!result.fullyAllocated,
+  };
+}
+
+function commitManualConstraint(label, previous, occ, focusDate, successMessage) {
+  invalidatePlan();
+  const result = manualConstraintResult(occ);
+  snapshotForUndo(label, { ...S, manualOverrides: previous });
+  save();
+  render();
+
+  if (!result.fullyAllocated) {
+    openDayHoursEditor(occ.taskId, focusDate, occ.occId);
+    showDayHoursWarning(result.shortfall);
+    return result;
+  }
+
+  showToast(successMessage);
+  return result;
 }
 
 function moveTaskAllocation(taskId, fromDs, toDs, hrs) {
@@ -2810,8 +2995,10 @@ function moveTaskAllocation(taskId, fromDs, toDs, hrs) {
     showToast('That scheduled block could not be found');
     return false;
   }
-  if (parseDate(toDs) < today() || parseDate(toDs) < parseDate(occ.windowStart) || parseDate(toDs) > parseDate(occ.deadline)) {
-    showToast(`Move it between ${fmt(parseDate(occ.windowStart))} and ${fmt(parseDate(occ.deadline))}`);
+  const earliest = occ.notBefore && parseDate(occ.notBefore) > parseDate(occ.windowStart)
+    ? occ.notBefore : occ.windowStart;
+  if (parseDate(toDs) < today() || parseDate(toDs) < parseDate(earliest) || parseDate(toDs) > parseDate(occ.deadline)) {
+    showToast(`Move it between ${fmt(parseDate(earliest))} and ${fmt(parseDate(occ.deadline))}`);
     return false;
   }
   if (!occurrenceCanAllocateOn(occ, toDs)) {
@@ -2821,26 +3008,32 @@ function moveTaskAllocation(taskId, fromDs, toDs, hrs) {
 
   const previous = cloneData(S.manualOverrides || {});
   const override = ensureManualOverride(occ.occId);
-  const targetExisting = beforePlan.occurrenceAllocations?.[occ.occId]?.[toDs] || 0;
+  const sourceWasFixed = constraintHoursForDate(occ, fromDs) !== undefined;
+  const targetExisting = constraintHoursForDate(occ, toDs)
+    ?? beforePlan.occurrenceAllocations?.[occ.occId]?.[toDs]
+    ?? 0;
   delete override.pinned[fromDs];
-  override.excludedDates = Array.from(new Set([...override.excludedDates, fromDs]));
+  override.excludedDates = override.excludedDates.filter(d => d !== fromDs);
+  if (!sourceWasFixed) {
+    override.excludedDates.push(fromDs);
+  }
+  override.excludedDates = Array.from(new Set(override.excludedDates));
   override.excludedDates = override.excludedDates.filter(d => d !== toDs);
   // Pin the target's existing occurrence allocation as well as the moved
   // hours. Otherwise turning an automatically allocated target into a pinned
   // day silently discards the hours it already held.
   override.pinned[toDs] = roundHours(Math.min(+occ.hours || 0, targetExisting + hrs));
 
-  const verification = verifyManualOverride(occ, fromDs, toDs, hrs, beforePlan);
-  if (!verification.valid) {
-    restoreManualOverrides(previous);
-    showToast('That move would leave work unscheduled, so Calico kept the current plan');
-    return false;
+  const result = commitManualConstraint(
+    'task move',
+    previous,
+    occ,
+    toDs,
+    `Moved to ${fmt(parseDate(toDs))}`
+  );
+  if (!result.fullyAllocated) {
+    showToast(`Move saved; ${result.shortfall}h now needs adjusting`);
   }
-
-  snapshotForUndo('task move', { ...S, manualOverrides: previous });
-  save();
-  render();
-  showToast(`Moved to ${fmt(parseDate(toDs))}`);
   return true;
 }
 
@@ -2853,45 +3046,235 @@ function skipTaskToTomorrow(taskId, dStr) {
   }
 
   const previous = cloneData(S.manualOverrides || {});
-  const override = ensureManualOverride(occ.occId);
-  delete override.pinned[dStr];
-  override.excludedDates = Array.from(new Set([...override.excludedDates, dStr]));
-
-  const verification = verifyManualOverride(
+  setDayConstraint(occ, dStr, 0);
+  const result = commitManualConstraint(
+    'task skip',
+    previous,
     occ,
     dStr,
-    null,
-    beforePlan.occurrenceAllocations?.[occ.occId]?.[dStr] || 0,
-    beforePlan
+    'Skipped and reallocated before the deadline'
   );
-  if (!verification.valid) {
-    restoreManualOverrides(previous);
-    const deadline = fmt(parseDate(occ.deadline));
-    showToast(`No later capacity before ${deadline}; the task was not skipped`);
-    return false;
+  if (!result.fullyAllocated) {
+    showToast(`Skip saved; ${result.shortfall}h cannot fit before ${fmt(parseDate(occ.deadline))}`);
   }
-
-  snapshotForUndo('task skip', { ...S, manualOverrides: previous });
-  save();
-  render();
-  showToast('Skipped and reallocated before the deadline');
   return true;
 }
 
-function returnTaskToAuto(taskId, dStr) {
+function returnTaskDayToAuto(taskId, dStr) {
   const plan = allocateSchedule();
-  const occ = occurrenceForTaskDate(taskId, dStr, plan)
-    || (plan.occurrences || []).find(candidate => candidate.taskId === taskId && S.manualOverrides?.[candidate.occId]);
-  if (!occ || !S.manualOverrides?.[occ.occId]) {
-    showToast('This task is already using automatic scheduling');
+  const occ = occurrenceForTaskDate(taskId, dStr, plan);
+  if (!occ || constraintHoursForDate(occ, dStr) === undefined) {
+    showToast('This day is already using automatic scheduling');
     return;
   }
-  snapshotForUndo('return to automatic scheduling');
+  const previous = cloneData(S.manualOverrides || {});
+  releaseDayConstraint(occ, dStr);
+  commitManualConstraint(
+    'return day to automatic scheduling',
+    previous,
+    occ,
+    dStr,
+    'This day is automatic again'
+  );
+}
+
+let _dayHoursOccId = null;
+let _dayHoursDate = null;
+let _dayHoursOriginal = 0;
+
+function dayHoursOccurrence() {
+  const plan = allocateSchedule();
+  return (plan.occurrences || []).find(occ => occ.occId === _dayHoursOccId) || null;
+}
+
+function maxConstraintHoursForDate(occ, dateStr) {
+  const otherFixed = constrainedDatesForOccurrence(occ).reduce((sum, date) => {
+    if (date === dateStr) return sum;
+    return sum + Math.max(0, constraintHoursForDate(occ, date) || 0);
+  }, 0);
+  return roundHours(Math.max(0, (+occ.hours || 0) - otherFixed));
+}
+
+function openDayHoursEditor(taskId, dateStr, occurrenceId) {
+  const plan = allocateSchedule();
+  const occ = (plan.occurrences || []).find(candidate => candidate.occId === occurrenceId)
+    || occurrenceForTaskDate(taskId, dateStr, plan);
+  if (!occ) {
+    showToast('That task occurrence could not be found');
+    return;
+  }
+
+  const task = S.tasks.find(candidate => candidate.id === taskId);
+  const fixed = constraintHoursForDate(occ, dateStr);
+  const scheduled = plan.occurrenceAllocations?.[occ.occId]?.[dateStr] || 0;
+  _dayHoursOccId = occ.occId;
+  _dayHoursDate = dateStr;
+  _dayHoursOriginal = roundHours(fixed === undefined ? scheduled : fixed);
+
+  document.getElementById('day-hours-title').textContent = task?.name || occ.name || 'Adjust daily hours';
+  document.getElementById('day-hours-date').textContent =
+    parseDate(dateStr).toLocaleDateString('en-GB', {
+      weekday: 'long', day: 'numeric', month: 'long',
+    });
+
+  const input = document.getElementById('day-hours-input');
+  input.value = _dayHoursOriginal;
+  input.max = maxConstraintHoursForDate(occ, dateStr);
+  document.getElementById('day-hours-auto').classList.toggle('hidden', fixed === undefined);
+  document.getElementById('day-hours-all-auto').classList.toggle(
+    'hidden',
+    constrainedDatesForOccurrence(occ).length === 0
+  );
+  document.getElementById('day-hours-warning').classList.add('hidden');
+  renderDayHoursLocks(occ, dateStr);
+  previewDayHours();
+
+  const result = manualConstraintResult(occ, plan);
+  if (!result.fullyAllocated && occurrenceHasUserConstraints(occ)) {
+    showDayHoursWarning(result.shortfall);
+  }
+  document.getElementById('day-hours-bg').classList.remove('hidden');
+  input.focus();
+  input.select();
+}
+
+function closeDayHoursEditor() {
+  document.getElementById('day-hours-bg').classList.add('hidden');
+  _dayHoursOccId = null;
+  _dayHoursDate = null;
+}
+
+function renderDayHoursLocks(occ, focusDate) {
+  const wrap = document.getElementById('day-hours-locks-wrap');
+  const list = document.getElementById('day-hours-locks');
+  const otherDates = constrainedDatesForOccurrence(occ).filter(date => date !== focusDate);
+  wrap.classList.toggle('hidden', otherDates.length === 0);
+  list.innerHTML = '';
+
+  otherDates.forEach(date => {
+    const row = document.createElement('div');
+    row.className = 'day-hours-lock-row';
+    row.innerHTML = `
+      <span>${parseDate(date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}</span>
+      <strong>${constraintHoursForDate(occ, date) || 0}h</strong>
+      <button type="button" class="btn-ghost">Release</button>`;
+    row.querySelector('button').onclick = () => releaseConstraintFromEditor(date);
+    list.appendChild(row);
+  });
+}
+
+function previewDayHours() {
+  const occ = dayHoursOccurrence();
+  if (!occ) return;
+  const input = document.getElementById('day-hours-input');
+  const max = maxConstraintHoursForDate(occ, _dayHoursDate);
+  const value = Math.max(0, Number(input.value) || 0);
+  const note = document.getElementById('day-hours-note');
+  if (value > max + ALLOC_EPSILON) {
+    note.textContent = `At most ${max}h can be fixed here because other fixed days already account for the rest.`;
+    note.classList.add('bad');
+    return;
+  }
+
+  const difference = roundHours(_dayHoursOriginal - value);
+  note.classList.remove('bad');
+  if (Math.abs(difference) <= ALLOC_EPSILON) {
+    note.textContent = 'Saving makes this day user-controlled. Calico will leave it unchanged.';
+  } else if (difference > 0) {
+    note.textContent = `${difference}h will be redistributed to other eligible days before the deadline.`;
+  } else {
+    note.textContent = `${Math.abs(difference)}h will be pulled from the task's other automatic days.`;
+  }
+}
+
+function stepDayHours(delta) {
+  const input = document.getElementById('day-hours-input');
+  input.value = roundHours(Math.max(0, (Number(input.value) || 0) + delta));
+  previewDayHours();
+}
+
+function showDayHoursWarning(shortfall) {
+  const warning = document.getElementById('day-hours-warning');
+  if (!warning) return;
+  document.getElementById('day-hours-warning-title').textContent =
+    `${roundHours(shortfall)}h cannot currently be scheduled.`;
+  document.getElementById('day-hours-warning-copy').textContent =
+    'Your fixed days have been kept. Adjust or release one of them, or close this panel and resolve the remaining conflict separately.';
+  warning.classList.remove('hidden');
+}
+
+function saveDayHours() {
+  const occ = dayHoursOccurrence();
+  if (!occ) return;
+  const input = document.getElementById('day-hours-input');
+  const hours = roundHours(Math.max(0, Number(input.value) || 0));
+  const max = maxConstraintHoursForDate(occ, _dayHoursDate);
+  if (hours > max + ALLOC_EPSILON) {
+    previewDayHours();
+    input.focus();
+    return;
+  }
+
+  const previous = cloneData(S.manualOverrides || {});
+  setDayConstraint(occ, _dayHoursDate, hours);
+  const result = commitManualConstraint(
+    'adjust daily task hours',
+    previous,
+    occ,
+    _dayHoursDate,
+    'Daily hours fixed; remaining work was redistributed'
+  );
+  if (result.fullyAllocated) closeDayHoursEditor();
+}
+
+function returnDayToAuto() {
+  const occ = dayHoursOccurrence();
+  if (!occ || constraintHoursForDate(occ, _dayHoursDate) === undefined) return;
+  const previous = cloneData(S.manualOverrides || {});
+  releaseDayConstraint(occ, _dayHoursDate);
+  const result = commitManualConstraint(
+    'return day to automatic scheduling',
+    previous,
+    occ,
+    _dayHoursDate,
+    'This day is automatic again'
+  );
+  if (result.fullyAllocated) closeDayHoursEditor();
+}
+
+function releaseConstraintFromEditor(dateStr) {
+  const occ = dayHoursOccurrence();
+  if (!occ) return;
+  const previous = cloneData(S.manualOverrides || {});
+  releaseDayConstraint(occ, dateStr);
+  const result = commitManualConstraint(
+    'release fixed task day',
+    previous,
+    occ,
+    _dayHoursDate,
+    'Fixed day released'
+  );
+  if (result.fullyAllocated) {
+    openDayHoursEditor(occ.taskId, _dayHoursDate, occ.occId);
+  }
+}
+
+function returnOccurrenceToAuto() {
+  const occ = dayHoursOccurrence();
+  if (!occ || !S.manualOverrides?.[occ.occId]) return;
+  const previous = cloneData(S.manualOverrides || {});
   delete S.manualOverrides[occ.occId];
   invalidatePlan();
+  const result = manualConstraintResult(occ);
+  snapshotForUndo('return occurrence to automatic scheduling', { ...S, manualOverrides: previous });
   save();
   render();
-  showToast('Returned to automatic scheduling');
+  closeDayHoursEditor();
+  if (result.fullyAllocated) {
+    showToast('This occurrence is automatic again');
+  } else {
+    showOverloadToast(`${occ.name}: ${result.shortfall}h still cannot fit before the deadline.`);
+  }
 }
 
 /* ══════════════════════════════════════════

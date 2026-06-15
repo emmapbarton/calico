@@ -207,6 +207,85 @@ test('user-entered HTML is escaped before rendering', () => {
   assert.equal(safeColor('not-a-colour'), '#111111');
 });
 
+test('daily reduction locks the chosen amount and redistributes the remainder', () => {
+  const task = makeTask('reduce-day', 6, 2);
+  resetState({ maxDailyHours: 4, tasks: [task] });
+  const before = allocateSchedule();
+  assert.equal(before.allocations[task.id][ds(today())], 2);
+  const occ = before.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 1);
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(after.allocations[task.id][ds(today())], 1);
+  assert.equal(total(after, task.id), 6);
+  assert.equal(after.occurrenceResults[occ.occId].fullyAllocated, true);
+});
+
+test('daily increase pulls hours from automatic days without changing task total', () => {
+  const task = makeTask('increase-day', 6, 2);
+  resetState({ maxDailyHours: 4, tasks: [task] });
+  const before = allocateSchedule();
+  const occ = before.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 3);
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(after.allocations[task.id][ds(today())], 3);
+  assert.equal(total(after, task.id), 6);
+  assert.equal(
+    roundHours(Object.entries(after.allocations[task.id])
+      .filter(([date]) => date !== ds(today()))
+      .reduce((sum, [, hours]) => sum + hours, 0)),
+    3
+  );
+});
+
+test('an impossible user lock remains stored and reports a constraint conflict', () => {
+  const task = makeTask('fixed-conflict', 6, 1);
+  resetState({ maxDailyHours: 4, tasks: [task] });
+  const before = allocateSchedule();
+  const occ = before.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 4);
+  S.events.push({
+    id: 'fixed-block', type: 'event', name: 'Block',
+    date: ds(today()), start: '09:00', end: '12:00',
+    repeat: 'none', color: '#e85d26',
+  });
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(constraintHoursForDate(occ, ds(today())), 4);
+  assert.equal(after.allocations[task.id][ds(today())], 1);
+  assert.equal(after.conflicts[task.id].shortfall, 3);
+  assert.equal(after.conflicts[task.id].reason, 'user_constraints');
+});
+
+test('releasing one fixed day returns it to automatic scheduling', () => {
+  const task = makeTask('release-day', 6, 2);
+  resetState({ maxDailyHours: 4, tasks: [task] });
+  const before = allocateSchedule();
+  const occ = before.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 1);
+  invalidatePlan();
+  assert.equal(allocateSchedule().allocations[task.id][ds(today())], 1);
+  releaseDayConstraint(occ, ds(today()));
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(constraintHoursForDate(occ, ds(today())), undefined);
+  assert.equal(after.allocations[task.id][ds(today())], 2);
+  assert.equal(total(after, task.id), 6);
+});
+
+test('ordinary task edits preserve valid user-controlled days', () => {
+  const task = makeTask('edit-fixed', 6, 2);
+  resetState({ maxDailyHours: 4, tasks: [task] });
+  const plan = allocateSchedule();
+  const occ = plan.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 1);
+  invalidatePlan();
+  _commitTask({ ...task, name: 'Renamed fixed task' }, task.id);
+  assert.equal(constraintHoursForDate(occ, ds(today())), 1);
+  assert.equal(allocateSchedule().allocations[task.id][ds(today())], 1);
+});
+
 test('stress 1: twenty repeated drags never change the requested total', () => {
   resetState({ maxDailyHours: 8, tasks: [makeTask('drag-loop', 10, 4)] });
   withInteractionStubs(() => {
@@ -222,7 +301,12 @@ test('stress 1: twenty repeated drags never change the requested total', () => {
       ));
       assert.ok(source && target, 'drag source/target should exist');
       assert.equal(moveTaskAllocation('drag-loop', source, target, allocation[source]), true);
-      assert.equal(total(allocateSchedule(), 'drag-loop'), 10);
+      const after = allocateSchedule();
+      assert.ok(total(after, 'drag-loop') <= 10);
+      assert.equal(
+        roundHours(total(after, 'drag-loop') + (after.conflicts['drag-loop']?.shortfall || 0)),
+        10
+      );
     }
   });
 });
@@ -247,7 +331,7 @@ test('stress 2: moving a visually split day moves the full day allocation once',
   });
 });
 
-test('stress 3: occupied target rejects and restores the exact override state', () => {
+test('stress 3: occupied target keeps the user move and exposes the shortfall', () => {
   const tomorrow = ds(addDays(today(), 1));
   resetState({
     maxDailyHours: 4,
@@ -255,12 +339,14 @@ test('stress 3: occupied target rejects and restores the exact override state', 
   });
   withInteractionStubs(getToast => {
     const beforePlan = allocateSchedule();
-    const beforeOverrides = JSON.stringify(S.manualOverrides);
     const sourceHours = beforePlan.allocations.move[ds(today())] || 0;
-    assert.equal(moveTaskAllocation('move', ds(today()), tomorrow, sourceHours), false);
-    assert.equal(JSON.stringify(S.manualOverrides), beforeOverrides);
-    assert.match(getToast(), /leave work unscheduled|kept the current plan/i);
-    assert.equal(total(allocateSchedule(), 'move'), total(beforePlan, 'move'));
+    assert.equal(moveTaskAllocation('move', ds(today()), tomorrow, sourceHours), true);
+    const after = allocateSchedule();
+    assert.equal(S.manualOverrides.move.pinned[tomorrow], sourceHours);
+    assert.ok(S.manualOverrides.move.excludedDates.includes(ds(today())));
+    assert.equal(after.allocations.move[ds(today())] || 0, 0);
+    assert.equal(after.conflicts.move.shortfall, 2);
+    assert.match(getToast(), /needs adjusting/i);
   });
 });
 
@@ -309,25 +395,32 @@ test('stress 6: repeated skip preserves demand until no later capacity exists', 
       const source = Object.keys(plan.allocations['skip-loop']).sort()[0];
       if (!source) break;
       const moved = skipTaskToTomorrow('skip-loop', source);
-      if (!moved) break;
+      assert.equal(moved, true);
       successes++;
-      assert.equal(total(allocateSchedule(), 'skip-loop'), 8);
+      const after = allocateSchedule();
+      assert.equal(
+        roundHours(total(after, 'skip-loop') + (after.conflicts['skip-loop']?.shortfall || 0)),
+        8
+      );
+      if (after.conflicts['skip-loop']) break;
     }
     assert.ok(successes >= 1);
   });
 });
 
-test('stress 7: skip on deadline day fails without changing the plan', () => {
+test('stress 7: skip on deadline day remains fixed at zero with a visible shortfall', () => {
   resetState({ tasks: [makeTask('deadline-skip', 2, 0)] });
   withInteractionStubs(getToast => {
-    const before = JSON.stringify(allocateSchedule().allocations['deadline-skip']);
-    assert.equal(skipTaskToTomorrow('deadline-skip', ds(today())), false);
-    assert.equal(JSON.stringify(allocateSchedule().allocations['deadline-skip']), before);
-    assert.match(getToast(), /not skipped/i);
+    assert.equal(skipTaskToTomorrow('deadline-skip', ds(today())), true);
+    const plan = allocateSchedule();
+    assert.equal(total(plan, 'deadline-skip'), 0);
+    assert.equal(plan.conflicts['deadline-skip'].shortfall, 2);
+    assert.ok(S.manualOverrides['deadline-skip'].excludedDates.includes(ds(today())));
+    assert.match(getToast(), /cannot fit/i);
   });
 });
 
-test('stress 8: skip with all later days blocked rolls back', () => {
+test('stress 8: skip with all later days blocked keeps the skip and flags demand', () => {
   const tomorrow = ds(addDays(today(), 1));
   resetState({
     maxDailyHours: 4,
@@ -338,9 +431,11 @@ test('stress 8: skip with all later days blocked rolls back', () => {
     }],
   });
   withInteractionStubs(() => {
-    const before = JSON.stringify(allocateSchedule().allocations['blocked-skip']);
-    assert.equal(skipTaskToTomorrow('blocked-skip', ds(today())), false);
-    assert.equal(JSON.stringify(allocateSchedule().allocations['blocked-skip']), before);
+    assert.equal(skipTaskToTomorrow('blocked-skip', ds(today())), true);
+    const after = allocateSchedule();
+    assert.equal(after.allocations['blocked-skip'][ds(today())] || 0, 0);
+    assert.equal(after.conflicts['blocked-skip'].shortfall, 4);
+    assert.equal(after.conflicts['blocked-skip'].reason, 'user_constraints');
   });
 });
 
@@ -403,7 +498,7 @@ test('stress 12: completion, drag, and uncheck do not duplicate hours', () => {
   });
 });
 
-test('stress 13: rejected drag does not disturb same-deadline fairness', () => {
+test('stress 13: constrained drag stays authoritative without stealing extra capacity', () => {
   const deadline = ds(addDays(today(), 1));
   resetState({
     maxDailyHours: 4,
@@ -418,10 +513,13 @@ test('stress 13: rejected drag does not disturb same-deadline fairness', () => {
     assert.equal(total(before, 'fair-a'), 3);
     assert.equal(total(before, 'fair-b'), 3);
     const source = ds(today());
-    assert.equal(moveTaskAllocation('fair-a', source, deadline, before.allocations['fair-a'][source]), false);
+    assert.equal(moveTaskAllocation('fair-a', source, deadline, before.allocations['fair-a'][source]), true);
     const after = allocateSchedule();
-    assert.equal(total(after, 'fair-a'), 3);
+    assert.equal(after.allocations['fair-a'][source] || 0, 0);
+    assert.equal(total(after, 'fair-a'), 2);
     assert.equal(total(after, 'fair-b'), 3);
+    assert.equal(after.conflicts['fair-a'].shortfall, 2);
+    assert.equal(after.dailyUsed[deadline], 2);
   });
 });
 
@@ -657,6 +755,8 @@ const element = {
   append() {},
   remove() {},
   click() {},
+  focus() {},
+  select() {},
   querySelector() { return element; },
   querySelectorAll() { return []; },
   value: '',

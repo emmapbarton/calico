@@ -21,7 +21,7 @@ function updateAllSliderFills() {
    STATE
 ══════════════════════════════════════════ */
 const DEFAULT_STATE = {
-  stateVersion: 2,
+  stateVersion: 3,
   onboarded: false,
   baseline: 7,
   distribution: 'even',
@@ -31,6 +31,8 @@ const DEFAULT_STATE = {
   taskOverworkAllowances: {}, // 'taskId|deadline|dateStr' → extra hours for that task occurrence only
   view: 'week',
   weekOffset: 0,
+  projects: [],
+  hiddenProjectIds: [],
   tasks: [],
   events: [],
   intensities: {},       // dateStr → 1‥10
@@ -53,7 +55,8 @@ const _undoStack = [];
 ══════════════════════════════════════════ */
 const STORAGE_KEY = 'calico_v2';
 const LEGACY_STORAGE_KEY = 'calico_v1';
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;
+const UNASSIGNED_PROJECT_ID = '__unassigned__';
 
 function cloneData(value) {
   return JSON.parse(JSON.stringify(value));
@@ -78,6 +81,32 @@ function normalizeState(input) {
   next.weekOffset = Math.trunc(finiteNumber(next.weekOffset, 0, -520, 520));
   next.tasks = Array.isArray(next.tasks) ? next.tasks.filter(Boolean) : [];
   next.events = Array.isArray(next.events) ? next.events.filter(Boolean) : [];
+  next.projects = Array.isArray(next.projects) ? next.projects.filter(Boolean) : [];
+  const seenProjectIds = new Set();
+  next.projects = next.projects.map((project, index) => {
+    const rawId = String(project?.id || `project-${index + 1}`);
+    let id = rawId;
+    let suffix = 2;
+    while (seenProjectIds.has(id) || id === UNASSIGNED_PROJECT_ID) {
+      id = `${rawId}-${suffix++}`;
+    }
+    seenProjectIds.add(id);
+    return {
+      id,
+      name: String(project?.name || 'Untitled project').trim().slice(0, 60) || 'Untitled project',
+      color: safeColor(project?.color, '#3f3f3f'),
+    };
+  });
+  const validProjectIds = new Set(next.projects.map(project => project.id));
+  next.tasks = next.tasks.map(task => ({
+    ...task,
+    projectId: validProjectIds.has(task.projectId) ? task.projectId : null,
+  }));
+  next.hiddenProjectIds = Array.isArray(next.hiddenProjectIds)
+    ? Array.from(new Set(next.hiddenProjectIds.filter(id => (
+      id === UNASSIGNED_PROJECT_ID || validProjectIds.has(id)
+    ))))
+    : [];
   next.intensities = next.intensities && typeof next.intensities === 'object' ? next.intensities : {};
   next.intensityHistory = Array.isArray(next.intensityHistory) ? next.intensityHistory.slice(-30) : [];
   next.taskLog = next.taskLog && typeof next.taskLog === 'object' ? next.taskLog : {};
@@ -1215,11 +1244,44 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function projectForTask(task) {
+  if (!task?.projectId) return null;
+  return S.projects.find(project => project.id === task.projectId) || null;
+}
+
+function projectBucketId(task) {
+  return projectForTask(task)?.id || UNASSIGNED_PROJECT_ID;
+}
+
+function isTaskVisible(task) {
+  return !(S.hiddenProjectIds || []).includes(projectBucketId(task));
+}
+
+function projectBuckets() {
+  const buckets = S.projects.map(project => ({
+    id: project.id,
+    name: project.name,
+    color: project.color,
+    tasks: S.tasks.filter(task => task.projectId === project.id),
+  }));
+  const unassigned = S.tasks.filter(task => !projectForTask(task));
+  if (unassigned.length) {
+    buckets.push({
+      id: UNASSIGNED_PROJECT_ID,
+      name: 'No project',
+      color: '#9b9b9b',
+      tasks: unassigned,
+    });
+  }
+  return buckets;
+}
+
 /* ══════════════════════════════════════════
    RENDER
 ══════════════════════════════════════════ */
 function render() {
   updateWeekLabel();
+  renderProjectFilters();
   renderSidebar();
   if (S.view==='week')        renderWeek();
   else if (S.view==='agenda')   renderAgenda();
@@ -1227,6 +1289,55 @@ function render() {
   syncNavButtons();
   // Update orange fill on all visible sliders after DOM settles
   requestAnimationFrame(updateAllSliderFills);
+}
+
+function renderProjectFilters() {
+  const bar = document.getElementById('project-filter-bar');
+  if (!bar) return;
+  const buckets = projectBuckets();
+  bar.classList.toggle('hidden', buckets.length === 0 || S.view === 'settings');
+  bar.innerHTML = '';
+  if (!buckets.length) return;
+
+  const label = document.createElement('span');
+  label.className = 'project-filter-label';
+  label.textContent = 'Show';
+  bar.appendChild(label);
+
+  buckets.forEach(bucket => {
+    const visible = !(S.hiddenProjectIds || []).includes(bucket.id);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `project-filter-chip${visible ? ' active' : ''}`;
+    button.setAttribute('aria-pressed', visible ? 'true' : 'false');
+    button.innerHTML = `<span style="background:${safeColor(bucket.color, '#9b9b9b')}"></span>${escapeHtml(bucket.name)}`;
+    button.onclick = () => toggleProjectVisibility(bucket.id);
+    bar.appendChild(button);
+  });
+
+  if ((S.hiddenProjectIds || []).length) {
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'project-filter-reset';
+    reset.textContent = 'Show all';
+    reset.onclick = showAllProjects;
+    bar.appendChild(reset);
+  }
+}
+
+function toggleProjectVisibility(projectId) {
+  const hidden = new Set(S.hiddenProjectIds || []);
+  if (hidden.has(projectId)) hidden.delete(projectId);
+  else hidden.add(projectId);
+  S.hiddenProjectIds = Array.from(hidden);
+  save();
+  render();
+}
+
+function showAllProjects() {
+  S.hiddenProjectIds = [];
+  save();
+  render();
 }
 
 function updateWeekLabel() {
@@ -1263,17 +1374,25 @@ function renderSidebar() {
 
   const sbTasks = document.getElementById('sb-tasks');
   sbTasks.innerHTML = '';
-  S.tasks.forEach(t => {
-    const conflict = plan.conflicts?.[t.id];
-    const rem = Math.max(0, t.hours - (t.logged ?? 0));
-    const rl  = t.repeat && t.repeat !== 'none' ? repeatLabel(t) : '';
-    const el  = document.createElement('div');
-    el.className = `sb-pill${conflict?.type === 'soft' ? ' needs-review' : ''}`;
-    el.innerHTML = `<span class="sb-dot" style="background:${safeColor(t.color)}"></span>
-      <span class="sb-name">${escapeHtml(t.name)}</span>
-      <span class="sb-hrs">${conflict?.type === 'soft' ? roundHours(conflict.shortfall) + 'h short' : (rl ? rl : rem + 'h')}</span>`;
-    el.onclick = () => openModal('task', t.id);
-    sbTasks.appendChild(el);
+  projectBuckets().forEach(bucket => {
+    const visibleTasks = bucket.tasks.filter(isTaskVisible);
+    if (!visibleTasks.length) return;
+    const heading = document.createElement('div');
+    heading.className = 'sb-project-heading';
+    heading.innerHTML = `<span style="background:${safeColor(bucket.color, '#9b9b9b')}"></span>${escapeHtml(bucket.name)}`;
+    sbTasks.appendChild(heading);
+    visibleTasks.forEach(t => {
+      const conflict = plan.conflicts?.[t.id];
+      const rem = Math.max(0, t.hours - (t.logged ?? 0));
+      const rl  = t.repeat && t.repeat !== 'none' ? repeatLabel(t) : '';
+      const el  = document.createElement('div');
+      el.className = `sb-pill${conflict?.type === 'soft' ? ' needs-review' : ''}`;
+      el.innerHTML = `<span class="sb-dot" style="background:${safeColor(t.color)}"></span>
+        <span class="sb-name">${escapeHtml(t.name)}</span>
+        <span class="sb-hrs">${conflict?.type === 'soft' ? roundHours(conflict.shortfall) + 'h short' : (rl ? rl : rem + 'h')}</span>`;
+      el.onclick = () => openModal('task', t.id);
+      sbTasks.appendChild(el);
+    });
   });
 
   renderReviewSidebar(plan);
@@ -1300,7 +1419,10 @@ function renderReviewSidebar(plan = allocateSchedule()) {
   const list = document.getElementById('sb-review');
   if (!wrap || !list) return;
 
-  const soft = softConflictEntries(plan);
+  const soft = softConflictEntries(plan).filter(info => {
+    const task = S.tasks.find(candidate => candidate.id === info.taskId);
+    return task && isTaskVisible(task);
+  });
   wrap.classList.toggle('hidden', !soft.length);
   list.innerHTML = '';
 
@@ -1428,6 +1550,7 @@ function renderWeek() {
 
     // Sort tasks: mandatory first, then optional
     const dayTasks = tasksOnDay(dStr)
+      .filter(isTaskVisible)
       .map(t => ({ task: t, hrs: taskHoursOnDay(t, dStr) }))
       .filter(x => x.hrs > 0)
       .sort((a, b) => {
@@ -1554,7 +1677,7 @@ function renderAgenda() {
     const load   = totalLoadOnDay(dStr);
     const cap    = dailyCapacityOn(dStr);
     const overload = dayOverloadLevel(dStr);
-    const tasks  = tasksOnDay(dStr);
+    const tasks  = tasksOnDay(dStr).filter(isTaskVisible);
     const events = eventsOnDay(dStr);
 
     // Overload class for load cell
@@ -2368,6 +2491,87 @@ function renderSettings() {
   // Sync max daily hours
   const mdh = document.getElementById('settings-max-daily-hours');
   if (mdh) mdh.value = S.maxDailyHours || 8;
+  renderProjectSettings();
+}
+
+function renderProjectSettings() {
+  const list = document.getElementById('settings-project-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (!S.projects.length) {
+    const empty = document.createElement('div');
+    empty.className = 'project-settings-empty';
+    empty.textContent = 'No projects yet.';
+    list.appendChild(empty);
+    return;
+  }
+
+  S.projects.forEach(project => {
+    const count = S.tasks.filter(task => task.projectId === project.id).length;
+    const row = document.createElement('div');
+    row.className = 'project-settings-row';
+    row.innerHTML = `
+      <input type="color" value="${safeColor(project.color, '#3f3f3f')}" aria-label="Project colour">
+      <input type="text" value="${escapeHtml(project.name)}" maxlength="60" aria-label="Project name">
+      <span>${count} task${count === 1 ? '' : 's'}</span>
+      <button type="button" class="icon-btn" title="Save project">✓</button>
+      <button type="button" class="icon-btn danger" title="Delete project">✕</button>`;
+    const [colorInput, nameInput] = row.querySelectorAll('input');
+    const [saveButton, deleteButton] = row.querySelectorAll('button');
+    saveButton.onclick = () => updateProject(project.id, nameInput.value, colorInput.value);
+    deleteButton.onclick = () => deleteProject(project.id);
+    list.appendChild(row);
+  });
+}
+
+function addProject() {
+  const nameInput = document.getElementById('settings-project-name');
+  const colorInput = document.getElementById('settings-project-color');
+  const name = nameInput.value.trim();
+  if (!name) {
+    nameInput.focus();
+    return;
+  }
+  snapshotForUndo('add project');
+  S.projects.push({
+    id: uid(),
+    name: name.slice(0, 60),
+    color: safeColor(colorInput.value, '#3f3f3f'),
+  });
+  nameInput.value = '';
+  save();
+  render();
+  showToast('Project added');
+}
+
+function updateProject(projectId, nameValue, colorValue) {
+  const project = S.projects.find(candidate => candidate.id === projectId);
+  const name = String(nameValue || '').trim();
+  if (!project || !name) {
+    showToast('Project name cannot be empty');
+    return;
+  }
+  snapshotForUndo('edit project');
+  project.name = name.slice(0, 60);
+  project.color = safeColor(colorValue, project.color);
+  save();
+  render();
+  showToast('Project saved');
+}
+
+function deleteProject(projectId) {
+  const project = S.projects.find(candidate => candidate.id === projectId);
+  if (!project || !confirm(`Delete "${project.name}"? Its tasks will move to No project.`)) return;
+  snapshotForUndo(`delete ${project.name}`);
+  S.projects = S.projects.filter(candidate => candidate.id !== projectId);
+  S.tasks.forEach(task => {
+    if (task.projectId === projectId) task.projectId = null;
+  });
+  S.hiddenProjectIds = (S.hiddenProjectIds || []).filter(id => id !== projectId);
+  save();
+  render();
+  showToast('Project deleted; tasks were kept');
 }
 
 function saveBaseline() {
@@ -2400,7 +2604,8 @@ function saveWorkingHours() {
 function resetData() {
   if (!confirm('Clear all tasks, events and intensity data? You can undo this until the page closes.')) return;
   snapshotForUndo('clear all data');
-  S.tasks = []; S.events = []; S.intensities = {}; S.intensityHistory = [];
+  S.tasks = []; S.events = []; S.projects = []; S.hiddenProjectIds = [];
+  S.intensities = {}; S.intensityHistory = [];
   S.taskLog = {}; S.manualOverrides = {}; S.taskOverworkAllowances = {};
   invalidatePlan();
   save(); render();
@@ -2449,6 +2654,20 @@ function onTypeChange() {
   const type = document.getElementById('f-type').value;
   document.getElementById('task-fields').classList.toggle('hidden', type !== 'task');
   document.getElementById('event-fields').classList.toggle('hidden', type !== 'event');
+  document.getElementById('task-project-field')?.classList.toggle('hidden', type !== 'task');
+}
+
+function populateProjectSelect(selectedId = '') {
+  const select = document.getElementById('f-project');
+  if (!select) return;
+  select.innerHTML = '<option value="">No project</option>';
+  S.projects.forEach(project => {
+    const option = document.createElement('option');
+    option.value = project.id;
+    option.textContent = project.name;
+    select.appendChild(option);
+  });
+  select.value = S.projects.some(project => project.id === selectedId) ? selectedId : '';
 }
 
 function manualOverrideKeysForTask(taskId) {
@@ -2503,6 +2722,7 @@ function openModal(type, id) {
   document.getElementById('modal-title-text').textContent = id ? `Edit ${type}` : `Add ${type}`;
   document.getElementById('modal-del').classList.toggle('hidden', !id);
   document.getElementById('f-type').value = type;
+  populateProjectSelect();
   onTypeChange();
 
   const todayVal = ds(today());
@@ -2519,6 +2739,7 @@ function openModal(type, id) {
       document.getElementById('f-priority').value = item.priority || 'mandatory';
       onTypeChange();
       if ((item.type||type) === 'task') {
+        populateProjectSelect(item.projectId || '');
         document.getElementById('f-deadline').value     = item.deadline || todayVal;
         document.getElementById('f-task-start-date').value = item.date || item.deadline || todayVal;
         document.getElementById('f-hours').value        = item.hours || 4;
@@ -2575,6 +2796,7 @@ function openModal(type, id) {
     document.getElementById('f-repeat').value         = 'none';
     document.getElementById('f-task-repeat').value    = 'none';
     document.getElementById('f-task-start-date').value = ds(today());
+    populateProjectSelect();
     onRepeatChange();
     onTaskRepeatChange();
     document.querySelectorAll('input[name="rday"]').forEach(cb => { cb.checked = false; });
@@ -2604,6 +2826,7 @@ function saveItem() {
     const obj = {
       id: editingId || uid(),
       type: 'task', name, priority, color,
+      projectId: document.getElementById('f-project').value || null,
       deadline: document.getElementById('f-deadline').value,
       date:     document.getElementById('f-deadline').value,
       hours:    parseFloat(document.getElementById('f-hours').value) || 4,

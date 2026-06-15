@@ -28,7 +28,6 @@ const DEFAULT_STATE = {
   dayStart: '09:00',
   dayEnd: '18:00',
   maxDailyHours: 8,
-  dayCapOverrides: {},      // deprecated legacy global overwork; ignored by allocator
   taskOverworkAllowances: {}, // 'taskId|deadline|dateStr' → extra hours for that task occurrence only
   view: 'week',
   weekOffset: 0,
@@ -39,7 +38,6 @@ const DEFAULT_STATE = {
   nudgeDismissed: false,
   taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
   lastCheckinDate: null,
-  pinnedAllocations: {}, // 'taskId|dateStr' → hours — drag/skip pinned
   manualOverrides: {}, // occurrenceId → { pinned: {dateStr: hours}, excludedDates: [] }
 };
 
@@ -83,19 +81,18 @@ function normalizeState(input) {
   next.intensities = next.intensities && typeof next.intensities === 'object' ? next.intensities : {};
   next.intensityHistory = Array.isArray(next.intensityHistory) ? next.intensityHistory.slice(-30) : [];
   next.taskLog = next.taskLog && typeof next.taskLog === 'object' ? next.taskLog : {};
-  next.dayCapOverrides = next.dayCapOverrides && typeof next.dayCapOverrides === 'object' ? next.dayCapOverrides : {};
   next.taskOverworkAllowances = next.taskOverworkAllowances && typeof next.taskOverworkAllowances === 'object'
     ? next.taskOverworkAllowances : {};
-  next.pinnedAllocations = next.pinnedAllocations && typeof next.pinnedAllocations === 'object'
-    ? next.pinnedAllocations : {};
   next.manualOverrides = next.manualOverrides && typeof next.manualOverrides === 'object'
     ? next.manualOverrides : {};
   if (!['week', 'agenda', 'settings'].includes(next.view)) next.view = 'week';
   if (!['even', 'front', 'back', 'weighted'].includes(next.distribution)) next.distribution = 'even';
 
   // Migrate safe legacy pins for single-occurrence tasks. Repeating legacy
-  // pins are intentionally left alone because they cannot identify an occurrence.
-  Object.entries(next.pinnedAllocations).forEach(([key, hours]) => {
+  // pins are discarded because they cannot identify an occurrence.
+  const legacyPins = raw.pinnedAllocations && typeof raw.pinnedAllocations === 'object'
+    ? raw.pinnedAllocations : {};
+  Object.entries(legacyPins).forEach(([key, hours]) => {
     const splitAt = key.lastIndexOf('|');
     if (splitAt < 0) return;
     const taskId = key.slice(0, splitAt);
@@ -105,8 +102,9 @@ function normalizeState(input) {
     if (!next.manualOverrides[taskId]) next.manualOverrides[taskId] = { pinned: {}, excludedDates: [] };
     next.manualOverrides[taskId].pinned ||= {};
     next.manualOverrides[taskId].pinned[dateStr] = finiteNumber(hours, 0, 0, 24);
-    delete next.pinnedAllocations[key];
   });
+  delete next.pinnedAllocations;
+  delete next.dayCapOverrides;
 
   Object.values(next.manualOverrides).forEach(override => {
     override.pinned = override.pinned && typeof override.pinned === 'object' ? override.pinned : {};
@@ -329,8 +327,7 @@ function buildDailyCapacity(days) {
     const base     = S.maxDailyHours || 8;
     const ratio    = getInt(dStr) / Math.max(1, S.baseline || 7);
     // Intensity can exceed baseline (ratio > 1) to allow more capacity.
-    // IMPORTANT: dayCapOverrides is legacy global overwork and is deliberately
-    // ignored here. Overwork is now task-scoped via taskOverworkAllowances.
+    // Overwork is task-scoped and is applied while allocating an occurrence.
     const rawCap   = base * ratio;
     // Hard cap: never exceed 24h (physical limit of a day).
     const cap      = Math.round(Math.min(24, Math.max(0, rawCap)) * 100) / 100;
@@ -573,24 +570,7 @@ function taskScopedOverworkFor(occ, dateStr) {
 
 function pinnedHoursForOccurrence(occ, dateStr) {
   const override = S.manualOverrides?.[occ.occId];
-  // Once an occurrence has a manual override, that record is authoritative.
-  // Do not fall through to stale legacy task-level pins.
-  if (override) return override.pinned?.[dateStr];
-
-  if (!S.pinnedAllocations) return undefined;
-
-  // New occurrence-scoped pin format for future use.
-  const occKey = occ.occId + '|' + dateStr;
-  if (S.pinnedAllocations[occKey] !== undefined) return S.pinnedAllocations[occKey];
-
-  // Legacy pins are only safe for non-repeating single-occurrence tasks.
-  // For repeating tasks, taskId|date pins can corrupt every occurrence, so ignore them.
-  if (occ.occId === occ.taskId) {
-    const legacyKey = occ.taskId + '|' + dateStr;
-    if (S.pinnedAllocations[legacyKey] !== undefined) return S.pinnedAllocations[legacyKey];
-  }
-
-  return undefined;
+  return override?.pinned?.[dateStr];
 }
 
 function excludedDatesForOccurrence(occ) {
@@ -905,9 +885,7 @@ function allocateSchedule() {
     intensities: S.intensities,
     baseline: S.baseline,
     maxDailyHours: S.maxDailyHours,
-    dayCapOverrides: S.dayCapOverrides,
     taskOverworkAllowances: S.taskOverworkAllowances,
-    pinnedAllocations: S.pinnedAllocations,
     manualOverrides: S.manualOverrides,
     taskLog: S.taskLog,
     distribution: S.distribution,
@@ -1064,11 +1042,6 @@ function totalLoadOnDay(dateStr) {
   return plan.dailyUsed[dateStr] ?? 0;
 }
 
-function freeHoursOnDay(dateStr) {
-  const plan = allocateSchedule();
-  return plan.dailyFree[dateStr] ?? 0;
-}
-
 function eventHoursOnDay(dateStr) {
   // Read event hours from plan (computed once in buildDailyCapacity)
   const plan = allocateSchedule();
@@ -1213,9 +1186,6 @@ function revalidateExistingTasks(showDialog) {
   return true;
 }
 
-/* ─── Wire invalidatePlan into clearAllocCache ───────────────── */
-function clearAllocCache() { invalidatePlan(); }
-
 /* ══════════════════════════════════════════
    COLOUR HELPERS
 ══════════════════════════════════════════ */
@@ -1223,11 +1193,6 @@ function hexBg(hex, alpha) {
   hex = safeColor(hex);
   const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
   return `rgba(${r},${g},${b},${alpha})`;
-}
-function isDark(hex) {
-  hex = safeColor(hex);
-  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
-  return (r*299+g*587+b*114)/1000 < 128;
 }
 function safeColor(value, fallback = '#111111') {
   return /^#[0-9a-f]{6}$/i.test(value || '') ? value : fallback;
@@ -1426,7 +1391,7 @@ function renderWeek() {
 
     // Events
     eventsOnDay(dStr).forEach(ev => {
-      const block = makeWeekBlock(ev, 'event', startH);
+      const block = makeWeekBlock(ev, 'event', dStr);
       if (block) col.appendChild(block);
     });
 
@@ -1467,8 +1432,7 @@ function renderWeek() {
         if (available <= 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; continue; }
         const used   = Math.min(remaining, available);
         const topPx  = (slotCursor - 0) * 54; // offset from midnight (GRID_START=0)
-        _currentRenderDStr = dStr;
-        const block  = makeWeekBlock(t, 'task', startH, used, topPx);
+        const block  = makeWeekBlock(t, 'task', dStr, used, topPx);
         if (block) col.appendChild(block);
         slotCursor += used;
         remaining  -= used;
@@ -1494,7 +1458,7 @@ function renderWeek() {
   });
 }
 
-function makeWeekBlock(item, type, startH, hours, stackTop) {
+function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
   const block = document.createElement('div');
   block.className = `wk-block${item.priority==='optional'?' optional':''}`;
   const color = safeColor(item.color);
@@ -1518,7 +1482,6 @@ function makeWeekBlock(item, type, startH, hours, stackTop) {
   }
 
   if (type === 'task') {
-    const sourceDs = _currentRenderDStr;
     // Drag to reschedule
     block.draggable = true;
     block.dataset.taskId   = item.id;
@@ -1777,38 +1740,14 @@ function toggleTaskLog(task, dStr, scheduledHrs) {
     // Uncheck — mark as missed (0 completed)
     S.taskLog[key] = { scheduled: scheduledHrs, completed: 0, checked: false };
   }
-  clearAllocCache();
+  invalidatePlan();
   save(); render();
   showToast(S.taskLog[key]?.checked ? 'Marked done' : 'Marked not done');
-}
-
-function makeAgendaEntry(item, type, dStr) {
-  // Kept for any legacy callers — routes to correct renderer
-  if (type === 'task') return makeAgendaTaskRow(item, dStr);
-  // Events are now rendered as strips, this shouldn't be called for events
-  return document.createElement('div');
 }
 
 /* ══════════════════════════════════════════
    CONFLICT RESOLUTION SYSTEM
 ══════════════════════════════════════════ */
-
-// Compute total free hours across a task's window (today → deadline).
-// This is a display helper only; actual conflict detection still uses
-// computeConflict() + allocateSchedule().
-function totalFreeHoursInWindow(deadline) {
-  const todayDate = today();
-  const end = parseDate(deadline);
-  if (end < todayDate) return 0;
-  const plan = allocateSchedule();
-  let total = 0;
-  let cur = new Date(todayDate);
-  while (cur <= end) {
-    total += plan.dailyFree[ds(cur)] || 0;
-    cur = addDays(cur, 1);
-  }
-  return Math.round(total * 100) / 100;
-}
 
 /* ── State for conflict dialog ── */
 let _conflictTask = null;   // the task obj being resolved
@@ -2188,21 +2127,6 @@ function applyConflictResolution() {
   }
 }
 
-function checkTaskOverload() {
-  const plan = allocateSchedule();
-  const hard = plan.conflictSummary?.hard || [];
-  const soft = plan.conflictSummary?.soft || [];
-  if (hard.length) {
-    const info = hard[0];
-    const taskId = info.taskId;
-    const task = S.tasks.find(t => t.id === taskId);
-    const name = task ? task.name : 'A task';
-    showOverloadToast(`${name}: ${Math.round(info.shortfall*10)/10}h cannot be scheduled. Consider extending the deadline or reducing hours.`);
-  } else if (soft.length) {
-    showOverloadToast(`This change displaced ${soft.length} optional task${soft.length!==1?'s':''}.`);
-  }
-}
-
 function softConflictInfoForTask(task) {
   const plan = allocateSchedule();
   const info = plan.conflicts?.[task.id];
@@ -2330,13 +2254,6 @@ function showOverloadToast(msg) {
   setTimeout(() => { if (el.parentNode) el.remove(); }, 8000);
 }
 
-function adjustHours(id, delta) {
-  const t = S.tasks.find(x => x.id===id);
-  if (!t) return;
-  t.hours = Math.max(0.5, Math.round((t.hours + delta) * 2) / 2);
-  save(); render();
-}
-
 function daysRemaining(task) {
   const deadline = parseDate(task.deadline);
   const t = today();
@@ -2398,8 +2315,7 @@ function resetData() {
   if (!confirm('Clear all tasks, events and intensity data? You can undo this until the page closes.')) return;
   snapshotForUndo('clear all data');
   S.tasks = []; S.events = []; S.intensities = {}; S.intensityHistory = [];
-  S.taskLog = {}; S.pinnedAllocations = {}; S.manualOverrides = {};
-  S.dayCapOverrides = {}; S.taskOverworkAllowances = {};
+  S.taskLog = {}; S.manualOverrides = {}; S.taskOverworkAllowances = {};
   invalidatePlan();
   save(); render();
   showToast('Data cleared');
@@ -2652,13 +2568,6 @@ function _commitTask(obj, eid) {
     });
   }
 
-  // Remove unsafe legacy pins when a task becomes repeating; legacy taskId|date
-  // pins cannot identify which occurrence they belong to.
-  if ((obj.repeat && obj.repeat !== 'none') && S.pinnedAllocations) {
-    Object.keys(S.pinnedAllocations).forEach(k => {
-      if (k.startsWith(obj.id + '|')) delete S.pinnedAllocations[k];
-    });
-  }
   if (eid && S.manualOverrides) {
     Object.keys(S.manualOverrides).forEach(key => {
       if (key === eid || key.startsWith(eid + '|occ|')) delete S.manualOverrides[key];
@@ -2800,7 +2709,6 @@ function uid() {
 /* ══════════════════════════════════════════
    DRAG TO RESCHEDULE + SKIP
 ══════════════════════════════════════════ */
-let _currentRenderDStr = '';
 let _dragTaskId   = null;
 let _dragSourceDs = null;
 let _dragHrs      = 0;
@@ -3103,7 +3011,7 @@ function submitCheckin() {
   });
 
   S.lastCheckinDate = todayStr;
-  clearAllocCache();
+  invalidatePlan();
   document.getElementById('checkin-bg').classList.add('hidden');
   save(); render();
   showToast('Check-in saved');

@@ -20,7 +20,6 @@ function resetState(overrides = {}) {
     events: [],
     intensities: {},
     taskLog: {},
-    pinnedAllocations: {},
     manualOverrides: {},
     ...overrides,
   });

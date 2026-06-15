@@ -358,8 +358,7 @@ body {
   flex-shrink: 0;
 }
 .topbar-left  { display: flex; align-items: center; gap: 8px; }
-.topbar-right { display: flex; align-items: center; }
-.topbar-right { gap: 8px; }
+.topbar-right { display: flex; align-items: center; gap: 8px; }
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 
 .week-label {
@@ -1251,8 +1250,7 @@ body {
 /* ─── 24H WEEK VIEW ───────────────────────── */
 .wk-hr-line.working     { background: var(--white); }
 .wk-hr-line.non-working { background: rgba(0,0,0,0.022); }
-.wk-time-slot.wk-working-hour { color: var(--ink-3); }
-.wk-time-slot           { color: var(--ink-4); opacity: 0.7; }
+.wk-time-slot { color: var(--ink-3); opacity: 0.7; }
 .wk-time-slot.wk-working-hour { opacity: 1; }
 
 /* Drag over highlight */

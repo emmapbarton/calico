@@ -360,8 +360,12 @@ function expandTaskOccurrences(tasks, days) {
     // Compute logged shortfall (missed hours to add back)
     let loggedShortfall = 0;
     Object.entries(S.taskLog).forEach(([key, entry]) => {
-      const [tid] = key.split('|');
+      const [tid, logDate] = key.split('|');
       if (tid !== task.id) return;
+      // Only completed past days can create carryover. A current/future
+      // checkbox being toggled off is not missed work and must never increase
+      // an occurrence beyond its requested hours.
+      if (!logDate || parseDate(logDate) >= todayDate) return;
       const gap = Math.max(0, (entry.scheduled || 0) - (entry.completed ?? entry.scheduled ?? 0));
       loggedShortfall += gap;
     });
@@ -1765,13 +1769,17 @@ function toggleTaskLog(task, dStr, scheduledHrs) {
   if (!entry || !entry.checked) {
     // Mark as done — fully completed
     S.taskLog[key] = { scheduled: scheduledHrs, completed: scheduledHrs, checked: true };
+  } else if (parseDate(dStr) >= today()) {
+    // Undoing a current/future completion returns it to neutral. Recording it
+    // as missed here would immediately add the same hours back as carryover.
+    delete S.taskLog[key];
   } else {
     // Uncheck — mark as missed (0 completed)
     S.taskLog[key] = { scheduled: scheduledHrs, completed: 0, checked: false };
   }
   clearAllocCache();
   save(); render();
-  showToast(S.taskLog[key].checked ? 'Marked done' : 'Marked not done');
+  showToast(S.taskLog[key]?.checked ? 'Marked done' : 'Marked not done');
 }
 
 function makeAgendaEntry(item, type, dStr) {
@@ -2905,10 +2913,14 @@ function moveTaskAllocation(taskId, fromDs, toDs, hrs) {
 
   const previous = cloneData(S.manualOverrides || {});
   const override = ensureManualOverride(occ.occId);
+  const targetExisting = beforePlan.occurrenceAllocations?.[occ.occId]?.[toDs] || 0;
   delete override.pinned[fromDs];
   override.excludedDates = Array.from(new Set([...override.excludedDates, fromDs]));
   override.excludedDates = override.excludedDates.filter(d => d !== toDs);
-  override.pinned[toDs] = roundHours((override.pinned[toDs] || 0) + hrs);
+  // Pin the target's existing occurrence allocation as well as the moved
+  // hours. Otherwise turning an automatically allocated target into a pinned
+  // day silently discards the hours it already held.
+  override.pinned[toDs] = roundHours(Math.min(+occ.hours || 0, targetExisting + hrs));
 
   const verification = verifyManualOverride(occ, fromDs, toDs, hrs, beforePlan);
   if (!verification.valid) {

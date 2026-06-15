@@ -452,6 +452,17 @@ body {
   padding: 8px 10px 6px;
   display: flex; flex-direction: column; align-items: stretch; gap: 4px;
 }
+.wk-int-cell.historical {
+  background: rgba(0,0,0,0.025);
+}
+.wk-int-cell.historical input,
+.ag-int-slider:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.wk-int-cell.historical .wk-int-val {
+  color: var(--ink-3);
+}
 .wk-int-val {
   font-family: var(--mono-ui);
   font-size: 11px; font-weight: 500;
@@ -487,7 +498,13 @@ body {
 }
 .wk-block:hover    { filter: brightness(0.88); }
 .wk-block.optional { opacity: 0.5; }
+.wk-block:not(.user-fixed) { border-right: 1px dashed currentColor; }
 .wk-block.user-fixed { box-shadow: inset 0 0 0 1px currentColor; }
+.wk-block.completed {
+  filter: grayscale(0.45);
+  opacity: 0.58;
+}
+.wk-block.completed .wk-block-title { text-decoration: line-through; }
 .wk-block-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wk-block-sub   { font-family: var(--mono-ui); font-size: 9px; font-weight: 400; opacity: 0.65; margin-top: 2px; }
 .wk-block-actions {
@@ -602,6 +619,12 @@ body {
 .badge-reduced { background: var(--accent-dim); color: var(--accent); border-color: rgba(232,93,38,0.3); }
 .badge-extra   { background: rgba(0,0,0,0.06); color: var(--ink-2); border-color: var(--cream-3); }
 .badge-fixed   { background: var(--ink); color: var(--white); border-color: var(--ink); }
+.badge-flexible {
+  background: transparent;
+  color: var(--ink-3);
+  border-style: dashed;
+  border-color: var(--ink-3);
+}
 
 /* ── Event strips (compact, one per line) ── */
 .ag-event-strips {
@@ -658,6 +681,10 @@ body {
 
 /* ── Intensity value low indicator ── */
 .ag-int-val.int-low { color: var(--accent); }
+.ag-int-slider:disabled + .ag-int-val {
+  color: var(--ink-3);
+  opacity: 0.65;
+}
 
 /* ── Overload toast (persistent, dismissible) ── */
 .overload-toast {
@@ -1186,6 +1213,30 @@ body {
   letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3);
   flex-shrink: 0;
 }
+.conflict-alternatives-toggle {
+  margin: 9px 1rem 6px;
+  padding: 10px 12px;
+  border: var(--border);
+  border-radius: var(--r);
+  background: var(--white);
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+}
+.conflict-alternatives-toggle:hover,
+.conflict-alternatives-toggle.expanded {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+.conflict-alternatives {
+  flex-shrink: 0;
+}
 .conflict-opts {
   padding: 0 1rem 0.75rem;
   display: flex; flex-direction: column; gap: 5px;
@@ -1337,23 +1388,6 @@ body {
 .ci-accent { width: 3px; height: 20px; border-radius: 2px; flex-shrink: 0; }
 .ci-name { flex: 1; font-size: 12px; font-weight: 500; color: var(--ink); }
 .ci-scheduled { font-family: var(--mono-ui); font-size: 10px; color: var(--ink-3); white-space: nowrap; }
-
-.ci-partial {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 12px 7px 40px;
-  background: var(--cream-2); border-radius: 0 0 var(--r) var(--r);
-  border: var(--border); border-top: none;
-  font-family: var(--mono-ui); font-size: 10px; color: var(--ink-3);
-  margin-top: -2px;
-}
-.ci-partial-input {
-  width: 60px; padding: 3px 7px;
-  border: var(--border); border-radius: 5px;
-  font-family: var(--sans); font-size: 12px; color: var(--ink); background: var(--white);
-  outline: none;
-}
-.ci-partial-input:focus { border-color: var(--ink); }
-.ci-redist-note { font-style: italic; }
 
 /* ─── TASK ROW STATES ─────────────────────── */
 .ag-task-check {

@@ -1342,14 +1342,17 @@ function renderWeek() {
   days.forEach(d => {
     const dStr = ds(d);
     const val = getInt(dStr);
+    const isPast = !canEditIntensity(dStr);
     const cell = document.createElement('div');
-    cell.className = 'wk-int-cell';
-    cell.innerHTML = `<input type="range" class="cal-slider-sm" min="1" max="10" value="${val}" data-d="${dStr}">
+    cell.className = `wk-int-cell${isPast ? ' historical' : ''}`;
+    cell.innerHTML = `<input type="range" class="cal-slider-sm" min="1" max="10" value="${val}" data-d="${dStr}"
+        ${isPast ? 'disabled title="Past intensity is recorded history"' : ''}>
       <div class="wk-int-val" id="wiv-${dStr}">${val}</div>`;
     intRow.appendChild(cell);
   });
   intRow.querySelectorAll('input[type=range]').forEach(s => {
     updateSliderFill(s);
+    if (s.disabled) return;
     s.addEventListener('input', () => {
       const v = +s.value;
       updateSliderFill(s);
@@ -1490,9 +1493,11 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     block.style.top    = stackTop + 'px';
     block.style.height = (hours * 54) + 'px';
     const isFixed = hasManualOverrideForTaskDate(item.id, sourceDs);
+    const completion = taskCompletionState(item, sourceDs);
     block.classList.toggle('user-fixed', isFixed);
+    block.classList.toggle('completed', completion.done);
     block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>
-      <div class="wk-block-sub">${Math.round(hours*10)/10}h${isFixed ? ' · fixed' : ''}</div>`;
+      <div class="wk-block-sub">${Math.round(hours*10)/10}h · ${isFixed ? 'fixed by you' : 'flexible'}</div>`;
   }
 
   if (type === 'task') {
@@ -1508,9 +1513,9 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
 
     const actions = document.createElement('div');
     actions.className = 'wk-block-actions';
-    const done = !!S.taskLog[item.id + '|' + sourceDs]?.checked;
     actions.innerHTML = `
-      <button type="button" class="wk-block-action${done ? ' active' : ''}" title="${done ? 'Mark not done' : 'Mark done'}">${done ? '✓' : '○'}</button>
+      <button type="button" class="wk-block-action${completion.done ? ' active' : ''}"
+        aria-label="${completion.actionLabel}" title="${completion.actionLabel}">${completion.done ? '✓' : '○'}</button>
       <button type="button" class="wk-block-action" title="Adjust hours for this day">±</button>
       <button type="button" class="wk-block-action" title="Skip and reallocate">→</button>`;
     const [doneBtn, adjustBtn, skipBtn] = actions.querySelectorAll('button');
@@ -1568,9 +1573,10 @@ function renderAgenda() {
           <div class="ag-dnum${isT?' today':''}">${d.getDate()}</div>
         </div>
         <div class="ag-int-col">
-          <div class="ag-int-lbl">Intensity</div>
+          <div class="ag-int-lbl">Intensity${isPast ? ' · recorded' : ''}</div>
           <div class="ag-int-row">
-            <input type="range" class="ag-int-slider cal-slider-sm" min="1" max="10" value="${val}" data-d="${dStr}">
+            <input type="range" class="ag-int-slider cal-slider-sm" min="1" max="10" value="${val}" data-d="${dStr}"
+              ${isPast ? 'disabled title="Past intensity is recorded history"' : ''}>
             <div class="ag-int-val${val < S.baseline ? ' int-low' : ''}" id="aiv-${dStr}">${val}</div>
           </div>
         </div>
@@ -1636,6 +1642,10 @@ function renderAgenda() {
     // Intensity slider
     const slider = dayEl.querySelector('.ag-int-slider');
     updateSliderFill(slider);
+    if (slider.disabled) {
+      body.appendChild(dayEl);
+      return;
+    }
     slider.addEventListener('input', () => {
       const v = +slider.value;
       updateSliderFill(slider);
@@ -1661,9 +1671,8 @@ function repeatLabel(ev) {
 function makeAgendaTaskRow(task, dStr) {
   const el = document.createElement('div');
   const isPast = parseDate(dStr) < today();
-  const logKey = task.id + '|' + dStr;
-  const logEntry = S.taskLog[logKey];
-  const isDone   = logEntry && logEntry.checked;
+  const completion = taskCompletionState(task, dStr);
+  const isDone   = completion.done;
   const isMissed = isPast && !isDone;
 
   el.className = `ag-task-row${task.priority==='optional'?' optional':''}${isDone?' completed':''}${isMissed?' missed':''}`;
@@ -1691,19 +1700,22 @@ function makeAgendaTaskRow(task, dStr) {
     : isMissed ? `<span class="badge badge-missed">missed</span>` : '';
   const fixedBadge = hasManualOverrideForTaskDate(task.id, dStr)
     ? `<span class="badge badge-fixed">fixed</span>` : '';
+  const schedulingBadge = fixedBadge ||
+    `<span class="badge badge-flexible">flexible</span>`;
 
   const hrsDisplay = isDone
     ? `<div class="ag-task-hrs crossed">${hrs}h</div>`
     : `<div class="ag-task-hrs">${hrs}h</div>`;
 
-  const checkbox = `<button type="button" class="ag-task-check" title="${isDone ? 'Mark not done' : 'Mark done'}">${isDone ? '✓' : ''}</button>`;
+  const checkbox = `<button type="button" class="ag-task-check" aria-label="${completion.actionLabel}"
+    title="${completion.actionLabel}">${isDone ? '✓' : ''}</button>`;
 
   el.innerHTML = `
     ${checkbox}
     <div class="ag-task-accent"></div>
     <div class="ag-task-name">${escapeHtml(task.name)}</div>
     <div class="ag-task-badges">
-      ${mandBadge}${priBadge}${statusBadge}${fixedBadge}${redistBadge}
+      ${mandBadge}${priBadge}${statusBadge}${schedulingBadge}${redistBadge}
       ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
     </div>
     ${hrsDisplay}`;
@@ -1776,6 +1788,19 @@ function toggleTaskLog(task, dStr, scheduledHrs) {
   showToast(S.taskLog[key]?.checked ? 'Marked done' : 'Marked not done');
 }
 
+function taskCompletionState(task, dStr) {
+  const entry = S.taskLog[task.id + '|' + dStr];
+  const done = !!entry?.checked;
+  return {
+    done,
+    actionLabel: done ? 'Mark not done' : 'Mark done',
+  };
+}
+
+function canEditIntensity(dateStr) {
+  return parseDate(dateStr) >= today();
+}
+
 /* ══════════════════════════════════════════
    CONFLICT RESOLUTION SYSTEM
 ══════════════════════════════════════════ */
@@ -1812,8 +1837,12 @@ function showConflictDialog(conflict, taskObj) {
     const sugFmt = sugD.toLocaleDateString('en-GB', {day:'numeric', month:'short'});
     sugText.innerHTML = '<strong>Extend deadline to ' + sugFmt + '.</strong> That\'s the earliest date where all ' + taskObj.hours + 'h can be fully scheduled at your current intensity.';
     document.getElementById('conflict-suggestion').classList.remove('hidden');
+    setConflictAlternativesExpanded(false);
+    document.getElementById('conflict-alternatives-toggle').classList.remove('hidden');
   } else {
     document.getElementById('conflict-suggestion').classList.add('hidden');
+    document.getElementById('conflict-alternatives-toggle').classList.add('hidden');
+    setConflictAlternativesExpanded(true);
   }
 
   // Option 1 — deadline picker
@@ -1855,17 +1884,33 @@ function discardConflictTask() {
 }
 
 function selectCopt(n) {
+  setConflictAlternativesExpanded(true);
   for (let i=1;i<=7;i++) {
     const el = document.getElementById('copt-'+i);
     if (el) el.classList.toggle('selected', i===n);
   }
 }
 
-function applySuggestion() {
+function applyRecommendedConflictResolution() {
   if (!_conflictData?.suggested) return;
   document.getElementById('copt-deadline').value = _conflictData.suggested;
   updateDeadlineBadge();
   selectCopt(1);
+  applyConflictResolution();
+}
+
+function setConflictAlternativesExpanded(expanded) {
+  document.getElementById('conflict-alternatives')?.classList.toggle('hidden', !expanded);
+  document.getElementById('conflict-alternatives-toggle')?.classList.toggle('expanded', expanded);
+  document.getElementById('conflict-apply')?.classList.toggle('hidden', !expanded);
+  const arrow = document.getElementById('conflict-alternatives-arrow');
+  if (arrow) arrow.textContent = expanded ? '−' : '＋';
+}
+
+function toggleConflictAlternatives() {
+  const alternatives = document.getElementById('conflict-alternatives');
+  if (!alternatives) return;
+  setConflictAlternativesExpanded(alternatives.classList.contains('hidden'));
 }
 
 function updateDeadlineBadge() {
@@ -3309,8 +3354,7 @@ function maybeShowCheckin() {
   container.innerHTML = '';
 
   unchecked.forEach(({ task, hrs, key, entry }) => {
-    const alreadyPartial = entry && !entry.checked;
-    const completed = entry ? (entry.completed ?? 0) : 0;
+    const completed = entry?.checked ? hrs : 0;
 
     const item = document.createElement('div');
     item.className = 'checkin-task-item';
@@ -3323,20 +3367,12 @@ function maybeShowCheckin() {
         <div class="ci-accent" style="background:${safeColor(task.color)}"></div>
         <div class="ci-name">${escapeHtml(task.name)}</div>
         <div class="ci-scheduled">${hrs}h scheduled</div>
-      </div>
-      <div class="ci-partial ${completed >= hrs ? 'hidden' : ''}">
-        <span>How much did you complete?</span>
-        <input type="number" class="ci-partial-input" value="${completed}" min="0" max="${hrs}" step="0.5"
-          oninput="onPartialInput(this)">
-        <span>h</span>
-        <span class="ci-redist-note" id="ci-note-${key.replace('|','-')}"></span>
       </div>`;
 
     if (completed >= hrs) {
       item.querySelector('.ci-check').classList.add('checked');
       item.querySelector('.ci-row').classList.add('done');
     }
-    updatePartialNote(item.querySelector('.ci-partial-input'), hrs);
     container.appendChild(item);
   });
 
@@ -3352,33 +3388,6 @@ function toggleCheckinItem(checkEl) {
   checkEl.textContent = isNowChecked ? '✓' : '';
   row.querySelector('.ci-row').classList.toggle('done', isNowChecked);
   row.dataset.completed = isNowChecked ? hrs : 0;
-
-  const partial = row.querySelector('.ci-partial');
-  partial.classList.toggle('hidden', isNowChecked);
-  if (!isNowChecked) {
-    const inp = partial.querySelector('.ci-partial-input');
-    inp.value = 0;
-    updatePartialNote(inp, hrs);
-  }
-}
-
-function onPartialInput(inp) {
-  const row = inp.closest('.checkin-task-item');
-  const hrs = parseFloat(row.dataset.scheduled);
-  const val = Math.min(hrs, Math.max(0, parseFloat(inp.value) || 0));
-  row.dataset.completed = val;
-  updatePartialNote(inp, hrs);
-}
-
-function updatePartialNote(inp, scheduledHrs) {
-  const val  = parseFloat(inp.value) || 0;
-  const gap  = Math.round((scheduledHrs - val) * 10) / 10;
-  const row  = inp.closest('.checkin-task-item');
-  const key  = row.dataset.key;
-  const note = document.getElementById('ci-note-' + key.replace('|', '-'));
-  if (!note) return;
-  note.textContent = gap > 0 ? `→ ${gap}h will be redistributed` : '→ fully done';
-  note.style.color = gap > 0 ? 'var(--accent)' : '#1e6641';
 }
 
 function submitCheckin() {
@@ -3388,9 +3397,8 @@ function submitCheckin() {
   document.querySelectorAll('.checkin-task-item').forEach(item => {
     const key       = item.dataset.key;
     const scheduled = parseFloat(item.dataset.scheduled);
-    const completed = parseFloat(item.dataset.completed);
-    const checked   = item.querySelector('.ci-check').classList.contains('checked') || completed >= scheduled;
-    S.taskLog[key]  = { scheduled, completed: checked ? scheduled : completed, checked };
+    const checked   = item.querySelector('.ci-check').classList.contains('checked');
+    S.taskLog[key]  = { scheduled, completed: checked ? scheduled : 0, checked };
   });
 
   S.lastCheckinDate = todayStr;

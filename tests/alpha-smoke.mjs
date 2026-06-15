@@ -286,6 +286,30 @@ test('ordinary task edits preserve valid user-controlled days', () => {
   assert.equal(allocateSchedule().allocations[task.id][ds(today())], 1);
 });
 
+test('past intensity is historical while today and future remain editable', () => {
+  assert.equal(canEditIntensity(ds(addDays(today(), -1))), false);
+  assert.equal(canEditIntensity(ds(today())), true);
+  assert.equal(canEditIntensity(ds(addDays(today(), 1))), true);
+});
+
+test('completion state exposes the same action in every view', () => {
+  const task = makeTask('completion-state', 2, 0);
+  resetState({ tasks: [task] });
+  assert.deepEqual(taskCompletionState(task, ds(today())), {
+    done: false,
+    actionLabel: 'Mark done',
+  });
+  S.taskLog[task.id + '|' + ds(today())] = {
+    scheduled: 2,
+    completed: 2,
+    checked: true,
+  };
+  assert.deepEqual(taskCompletionState(task, ds(today())), {
+    done: true,
+    actionLabel: 'Mark not done',
+  });
+});
+
 test('stress 1: twenty repeated drags never change the requested total', () => {
   resetState({ maxDailyHours: 8, tasks: [makeTask('drag-loop', 10, 4)] });
   withInteractionStubs(() => {

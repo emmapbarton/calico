@@ -413,12 +413,17 @@
       </div>
       <div class="csug-body">
         <div class="csug-text" id="csug-text"></div>
-        <button class="csug-apply" onclick="applySuggestion()">Apply →</button>
+        <button class="csug-apply" onclick="applyRecommendedConflictResolution()">Use suggested deadline →</button>
       </div>
     </div>
 
-    <div class="conflict-opts-label">Or choose your own fix</div>
-    <div class="conflict-opts" id="conflict-opts">
+    <button type="button" class="conflict-alternatives-toggle" id="conflict-alternatives-toggle" onclick="toggleConflictAlternatives()">
+      <span>Other ways to resolve this</span>
+      <span id="conflict-alternatives-arrow">＋</span>
+    </button>
+    <div id="conflict-alternatives" class="conflict-alternatives hidden">
+      <div class="conflict-opts-label">Choose another fix</div>
+      <div class="conflict-opts" id="conflict-opts">
 
       <div class="copt" id="copt-1" onclick="selectCopt(1)">
         <div class="copt-head">
@@ -537,13 +542,14 @@
         </div>
       </div>
 
+      </div>
     </div>
 
     <div class="conflict-foot">
       <button class="btn-warn" onclick="discardConflictTask()">Discard task</button>
       <div style="display:flex;gap:8px">
         <button class="btn-ghost" onclick="closeConflict()">Back</button>
-        <button class="btn-primary" onclick="applyConflictResolution()">Apply →</button>
+        <button class="btn-primary" id="conflict-apply" onclick="applyConflictResolution()">Apply selected fix →</button>
       </div>
     </div>
 
@@ -586,7 +592,7 @@
       <div id="checkin-tasks"></div>
     </div>
     <div class="checkin-footer">
-      <span class="checkin-note">Unchecked time will be redistributed to future days</span>
+      <span class="checkin-note">Tasks marked not done will be redistributed to future days</span>
       <div style="display:flex;gap:8px">
         <button class="btn-ghost" onclick="remindCheckinLater()">Remind later</button>
         <button class="btn-primary" onclick="submitCheckin()">Done →</button>

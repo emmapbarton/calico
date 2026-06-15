@@ -487,6 +487,7 @@ body {
 }
 .wk-block:hover    { filter: brightness(0.88); }
 .wk-block.optional { opacity: 0.5; }
+.wk-block.user-fixed { box-shadow: inset 0 0 0 1px currentColor; }
 .wk-block-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wk-block-sub   { font-family: var(--mono-ui); font-size: 9px; font-weight: 400; opacity: 0.65; margin-top: 2px; }
 .wk-block-actions {
@@ -600,6 +601,7 @@ body {
 .badge-opt     { background: var(--cream-2); color: var(--ink-3); border-color: var(--cream-3); font-style: italic; }
 .badge-reduced { background: var(--accent-dim); color: var(--accent); border-color: rgba(232,93,38,0.3); }
 .badge-extra   { background: rgba(0,0,0,0.06); color: var(--ink-2); border-color: var(--cream-3); }
+.badge-fixed   { background: var(--ink); color: var(--white); border-color: var(--ink); }
 
 /* ── Event strips (compact, one per line) ── */
 .ag-event-strips {
@@ -748,6 +750,144 @@ body {
   display: flex; align-items: center;
 }
 .modal-actions { display: flex; gap: 8px; margin-left: auto; }
+
+/* ─── USER-CONTROLLED DAILY HOURS ────────── */
+.manual-controls {
+  border: var(--border);
+  border-radius: var(--r);
+  padding: 11px 12px;
+  background: var(--cream);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.manual-controls > div { flex: 1; min-width: 0; }
+.manual-controls-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.manual-controls-copy {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-3);
+}
+.manual-controls .btn-ghost {
+  padding: 7px 9px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.day-hours-modal { max-width: 500px; }
+.day-hours-eyebrow {
+  font-family: var(--mono-ui);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 4px;
+}
+.constraint-warning {
+  border: 1px solid rgba(232,93,38,0.35);
+  background: var(--accent-dim);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  color: var(--accent);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.constraint-warning strong { color: var(--accent); }
+.day-hours-date {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.day-hours-stepper {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 42px;
+  gap: 8px;
+  align-items: stretch;
+}
+.day-hours-stepper > button {
+  border: var(--border);
+  border-radius: var(--r);
+  background: var(--cream);
+  color: var(--ink);
+  font-size: 20px;
+  cursor: pointer;
+}
+.day-hours-stepper > button:hover { border-color: var(--ink); }
+.day-hours-stepper label {
+  border: var(--border-ink);
+  border-radius: var(--r);
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+}
+.day-hours-stepper input {
+  width: 86px;
+  border: 0;
+  outline: 0;
+  font-family: var(--mono-hd);
+  font-size: 24px;
+  font-weight: 700;
+  text-align: right;
+  color: var(--ink);
+  background: transparent;
+}
+.day-hours-stepper label span {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.day-hours-note {
+  min-height: 34px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+.day-hours-note.bad { color: var(--accent); }
+.day-hours-locks-wrap {
+  border-top: var(--border);
+  padding-top: 12px;
+}
+.day-hours-locks-title {
+  font-family: var(--mono-ui);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-bottom: 6px;
+}
+.day-hours-locks {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.day-hours-lock-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+}
+.day-hours-lock-row strong {
+  font-family: var(--mono-ui);
+  font-size: 11px;
+}
+.day-hours-lock-row .btn-ghost {
+  padding: 5px 8px;
+  font-size: 10px;
+}
+.day-hours-foot {
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.day-hours-foot .btn-primary { margin-left: auto; }
 
 /* ─── REVIEW PANEL ────────────────────────── */
 .review-modal {
@@ -1343,6 +1483,8 @@ body {
   }
   .modal-body { overflow: visible; }
   .modal-foot, .checkin-footer { position: sticky; bottom: 0; background: var(--white); }
+  .manual-controls { align-items: flex-start; flex-direction: column; }
+  .day-hours-foot .btn-primary { width: 100%; margin-left: 0; }
 
   .mobile-nav {
     position: fixed;

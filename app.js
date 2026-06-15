@@ -1598,6 +1598,7 @@ function renderWeek() {
 
 function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
   const block = document.createElement('div');
+  const completion = type === 'task' ? taskCompletionState(item, sourceDs) : null;
   block.className = `wk-block${item.priority==='optional'?' optional':''}`;
   const color = safeColor(item.color);
   block.style.background = hexBg(color, 0.12);
@@ -1616,7 +1617,6 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     block.style.top    = stackTop + 'px';
     block.style.height = (hours * 54) + 'px';
     const isFixed = hasManualOverrideForTaskDate(item.id, sourceDs);
-    const completion = taskCompletionState(item, sourceDs);
     block.classList.toggle('user-fixed', isFixed);
     block.classList.toggle('completed', completion.done);
     block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>

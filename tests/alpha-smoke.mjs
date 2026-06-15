@@ -769,6 +769,63 @@ test('stress 20: 150 tasks and 50 repeating events remain finite and determinist
   });
 });
 
+test('projects migrate defensively and orphaned task assignments become unassigned', () => {
+  const state = normalizeState({
+    projects: [
+      { id: 'study', name: 'Study', color: '#2e6b4f' },
+      { id: 'study', name: 'Duplicate', color: 'bad' },
+    ],
+    hiddenProjectIds: ['study', 'missing', UNASSIGNED_PROJECT_ID],
+    tasks: [
+      makeTask('valid-project', 2, 1, { projectId: 'study' }),
+      makeTask('orphan-project', 2, 1, { projectId: 'missing' }),
+    ],
+    events: [],
+  });
+  assert.equal(state.projects.length, 2);
+  assert.notEqual(state.projects[0].id, state.projects[1].id);
+  assert.equal(state.projects[1].color, '#3f3f3f');
+  assert.equal(state.tasks[0].projectId, 'study');
+  assert.equal(state.tasks[1].projectId, null);
+  assert.deepEqual(state.hiddenProjectIds, ['study', UNASSIGNED_PROJECT_ID]);
+});
+
+test('project visibility filters never change canonical allocation', () => {
+  resetState({
+    projects: [
+      { id: 'study', name: 'Study', color: '#2e6b4f' },
+      { id: 'work', name: 'Work', color: '#4a3a7a' },
+    ],
+    tasks: [
+      makeTask('study-task', 5, 2, { projectId: 'study' }),
+      makeTask('work-task', 5, 2, { projectId: 'work' }),
+      makeTask('no-project-task', 3, 2),
+    ],
+  });
+  const expected = JSON.stringify(allocateSchedule());
+  S.hiddenProjectIds = ['study', UNASSIGNED_PROJECT_ID];
+  assert.equal(isTaskVisible(S.tasks[0]), false);
+  assert.equal(isTaskVisible(S.tasks[1]), true);
+  assert.equal(isTaskVisible(S.tasks[2]), false);
+  assert.equal(JSON.stringify(allocateSchedule()), expected);
+});
+
+test('project metadata survives repeated backup normalization without plan drift', () => {
+  resetState({
+    projects: [{ id: 'alpha', name: 'Alpha', color: '#8b3a2a' }],
+    hiddenProjectIds: ['alpha'],
+    tasks: [makeTask('alpha-task', 6, 3, { projectId: 'alpha' })],
+  });
+  const beforeState = JSON.stringify(S);
+  const beforePlan = JSON.stringify(allocateSchedule());
+  for (let i = 0; i < 5; i++) {
+    S = normalizeState(JSON.parse(JSON.stringify(S)));
+    invalidatePlan();
+  }
+  assert.equal(JSON.stringify(S), beforeState);
+  assert.equal(JSON.stringify(allocateSchedule()), beforePlan);
+});
+
 JSON.stringify(results);
 `;
 

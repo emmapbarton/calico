@@ -97,6 +97,7 @@
         </div>
       </div>
     </div>
+    <div id="project-filter-bar" class="project-filter-bar hidden" aria-label="Project filters"></div>
 
     <div id="view-week" class="view-panel">
       <div class="wk-head" id="wk-head"></div>
@@ -148,7 +149,7 @@
         </div>
         <div class="settings-card settings-card--danger">
           <h2 class="settings-heading">RESET DATA</h2>
-          <p class="settings-sub">Clear all tasks, events and intensity history. Settings are kept.</p>
+          <p class="settings-sub">Clear all tasks, events, projects and intensity history. Settings are kept.</p>
           <button class="btn-danger" onclick="resetData()">Clear all data</button>
         </div>
         <div class="settings-card">
@@ -159,6 +160,16 @@
             <button class="btn-ghost" onclick="chooseImportFile()">Import backup</button>
             <input class="hidden" id="import-data-file" type="file" accept="application/json,.json" onchange="importDataFile(this)">
           </div>
+        </div>
+        <div class="settings-card">
+          <h2 class="settings-heading">PROJECTS</h2>
+          <p class="settings-sub">Group related tasks and filter the schedule without changing how Calico allocates time.</p>
+          <div class="project-create-row">
+            <input type="color" id="settings-project-color" value="#2e6b4f" aria-label="New project colour">
+            <input type="text" id="settings-project-name" maxlength="60" placeholder="Project name" onkeydown="if(event.key==='Enter')addProject()">
+            <button class="btn-primary" type="button" onclick="addProject()">Add project</button>
+          </div>
+          <div id="settings-project-list" class="project-settings-list"></div>
         </div>
         </div><!-- /settings-grid -->
       </div>
@@ -190,6 +201,10 @@
         <div class="field-group"><label>Priority</label><select id="f-priority"><option value="mandatory">Mandatory</option><option value="optional">Optional</option><option value="deferred">Deferred</option></select></div>
       </div>
       <div id="task-fields">
+        <div class="field-group" id="task-project-field">
+          <label>Project <span style="font-style:italic;opacity:0.6">(optional)</span></label>
+          <select id="f-project"><option value="">No project</option></select>
+        </div>
         <div class="field-row">
           <div class="field-group"><label id="task-deadline-label">Deadline</label><input type="date" id="f-deadline"></div>
           <div class="field-group"><label>Hours per occurrence</label><input type="number" id="f-hours" min="0.5" step="0.5" value="4"></div>

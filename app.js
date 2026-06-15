@@ -2913,10 +2913,14 @@ function moveTaskAllocation(taskId, fromDs, toDs, hrs) {
 
   const previous = cloneData(S.manualOverrides || {});
   const override = ensureManualOverride(occ.occId);
+  const targetExisting = beforePlan.occurrenceAllocations?.[occ.occId]?.[toDs] || 0;
   delete override.pinned[fromDs];
   override.excludedDates = Array.from(new Set([...override.excludedDates, fromDs]));
   override.excludedDates = override.excludedDates.filter(d => d !== toDs);
-  override.pinned[toDs] = roundHours((override.pinned[toDs] || 0) + hrs);
+  // Pin the target's existing occurrence allocation as well as the moved
+  // hours. Otherwise turning an automatically allocated target into a pinned
+  // day silently discards the hours it already held.
+  override.pinned[toDs] = roundHours(Math.min(+occ.hours || 0, targetExisting + hrs));
 
   const verification = verifyManualOverride(occ, fromDs, toDs, hrs, beforePlan);
   if (!verification.valid) {

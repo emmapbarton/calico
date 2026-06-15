@@ -360,8 +360,12 @@ function expandTaskOccurrences(tasks, days) {
     // Compute logged shortfall (missed hours to add back)
     let loggedShortfall = 0;
     Object.entries(S.taskLog).forEach(([key, entry]) => {
-      const [tid] = key.split('|');
+      const [tid, logDate] = key.split('|');
       if (tid !== task.id) return;
+      // Only completed past days can create carryover. A current/future
+      // checkbox being toggled off is not missed work and must never increase
+      // an occurrence beyond its requested hours.
+      if (!logDate || parseDate(logDate) >= todayDate) return;
       const gap = Math.max(0, (entry.scheduled || 0) - (entry.completed ?? entry.scheduled ?? 0));
       loggedShortfall += gap;
     });
@@ -1765,13 +1769,17 @@ function toggleTaskLog(task, dStr, scheduledHrs) {
   if (!entry || !entry.checked) {
     // Mark as done — fully completed
     S.taskLog[key] = { scheduled: scheduledHrs, completed: scheduledHrs, checked: true };
+  } else if (parseDate(dStr) >= today()) {
+    // Undoing a current/future completion returns it to neutral. Recording it
+    // as missed here would immediately add the same hours back as carryover.
+    delete S.taskLog[key];
   } else {
     // Uncheck — mark as missed (0 completed)
     S.taskLog[key] = { scheduled: scheduledHrs, completed: 0, checked: false };
   }
   clearAllocCache();
   save(); render();
-  showToast(S.taskLog[key].checked ? 'Marked done' : 'Marked not done');
+  showToast(S.taskLog[key]?.checked ? 'Marked done' : 'Marked not done');
 }
 
 function makeAgendaEntry(item, type, dStr) {

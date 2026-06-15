@@ -99,6 +99,85 @@ test('repeating occurrence override does not bleed into the next occurrence', ()
   assert.equal(plan.occurrenceResults[secondId].fullyAllocated, true);
 });
 
+test('current-day unchecked log cannot inflate a repeating occurrence', () => {
+  const repeating = makeTask('pq', 10, 6, {
+    repeat: 'weekly',
+    repeatEndType: 'count',
+    repeatCount: 2,
+  });
+  resetState({
+    tasks: [repeating],
+    taskLog: {
+      ['pq|' + ds(today())]: { scheduled: 2, completed: 0, checked: false },
+    },
+  });
+  const plan = allocateSchedule();
+  const occurrenceId = 'pq|occ|' + repeating.deadline;
+  const allocated = roundHours(Object.values(plan.occurrenceAllocations[occurrenceId] || {})
+    .reduce((sum, hours) => sum + hours, 0));
+  assert.equal(allocated, 10);
+  assert.equal(plan.occurrenceResults[occurrenceId].shortfall, 0);
+});
+
+test('dragged weekly task with weekday events remains capped at requested hours', () => {
+  const deadline = ds(addDays(today(), 7));
+  const occurrenceId = 'pq-drag|occ|' + deadline;
+  const repeating = makeTask('pq-drag', 10, 7, {
+    repeat: 'weekly',
+    repeatEndType: 'count',
+    repeatCount: 2,
+  });
+  resetState({
+    baseline: 8,
+    maxDailyHours: 12,
+    tasks: [repeating],
+    events: [{
+      id: 'fcs',
+      type: 'event',
+      name: 'FCS',
+      date: ds(addDays(today(), 1)),
+      start: '07:30',
+      end: '17:00',
+      repeat: 'weekdays',
+      color: '#e85d26',
+    }],
+    taskLog: {
+      ['pq-drag|' + ds(today())]: { scheduled: 2, completed: 0, checked: false },
+    },
+    manualOverrides: {
+      [occurrenceId]: {
+        pinned: {
+          [ds(addDays(today(), 6))]: 4,
+          [deadline]: 4,
+        },
+        excludedDates: [],
+      },
+    },
+  });
+  const plan = allocateSchedule();
+  const allocation = plan.occurrenceAllocations[occurrenceId] || {};
+  const allocated = roundHours(Object.values(allocation).reduce((sum, hours) => sum + hours, 0));
+  assert.equal(allocated, 10, JSON.stringify({
+    allocation,
+    result: plan.occurrenceResults[occurrenceId],
+    free: plan.dailyFree,
+  }));
+  assert.equal(allocation[ds(addDays(today(), 6))], 4);
+  assert.equal(allocation[deadline], 4);
+});
+
+test('genuine past missed work still carries forward', () => {
+  const task = makeTask('carry', 4, 1);
+  resetState({
+    tasks: [task],
+    taskLog: {
+      ['carry|' + ds(addDays(today(), -1))]: { scheduled: 2, completed: 0, checked: false },
+    },
+  });
+  const plan = allocateSchedule();
+  assert.equal(total(plan, task.id), 6);
+});
+
 test('user-entered HTML is escaped before rendering', () => {
   assert.equal(escapeHtml('<img src=x onerror=1>'), '&lt;img src=x onerror=1&gt;');
   assert.equal(safeColor('not-a-colour'), '#111111');

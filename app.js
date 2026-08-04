@@ -21,13 +21,16 @@ function updateAllSliderFills() {
    STATE
 ══════════════════════════════════════════ */
 const DEFAULT_STATE = {
-  stateVersion: 3,
+  stateVersion: 4,
   onboarded: false,
   baseline: 7,
   distribution: 'even',
   dayStart: '09:00',
   dayEnd: '18:00',
   maxDailyHours: 8,
+  weekdayCapacity: {}, // JS day index (0=Sun) → default max task hours for that weekday
+  minBlockHours: 0.5,
+  splitTasks: true,
   taskOverworkAllowances: {}, // 'taskId|deadline|dateStr' → extra hours for that task occurrence only
   view: 'week',
   weekOffset: 0,
@@ -55,7 +58,7 @@ const _undoStack = [];
 ══════════════════════════════════════════ */
 const STORAGE_KEY = 'calico_v2';
 const LEGACY_STORAGE_KEY = 'calico_v1';
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
 const UNASSIGNED_PROJECT_ID = '__unassigned__';
 
 function cloneData(value) {
@@ -78,6 +81,16 @@ function normalizeState(input) {
 
   next.baseline = finiteNumber(next.baseline, 7, 1, 10);
   next.maxDailyHours = finiteNumber(next.maxDailyHours, 8, 0.5, 24);
+  next.minBlockHours = finiteNumber(next.minBlockHours, 0.5, 0.25, 24);
+  next.splitTasks = next.splitTasks !== false;
+  next.weekdayCapacity = next.weekdayCapacity && typeof next.weekdayCapacity === 'object' ? next.weekdayCapacity : {};
+  for (let i = 0; i < 7; i++) {
+    if (next.weekdayCapacity[i] !== undefined && next.weekdayCapacity[String(i)] !== undefined) {
+      next.weekdayCapacity[String(i)] = finiteNumber(next.weekdayCapacity[String(i)], next.maxDailyHours, 0, 24);
+    } else if (next.weekdayCapacity[i] !== undefined) {
+      next.weekdayCapacity[String(i)] = finiteNumber(next.weekdayCapacity[i], next.maxDailyHours, 0, 24);
+    }
+  }
   next.weekOffset = Math.trunc(finiteNumber(next.weekOffset, 0, -520, 520));
   next.tasks = Array.isArray(next.tasks) ? next.tasks.filter(Boolean) : [];
   next.events = Array.isArray(next.events) ? next.events.filter(Boolean) : [];
@@ -355,8 +368,12 @@ function buildDailyCapacity(days) {
   const events   = {}; // dateStr → [{...}]
 
   days.forEach(dStr => {
-    // Raw capacity = maxDailyHours × intensityRatio
-    const base     = S.maxDailyHours || 8;
+    // Raw capacity = weekday-specific max task hours × intensityRatio,
+    // capped by the preferred working-hours window.
+    const dow      = parseDate(dStr).getDay();
+    const windowH  = Math.max(0, timeH(S.dayEnd || '18:00') - timeH(S.dayStart || '09:00'));
+    const weekdayBase = S.weekdayCapacity?.[String(dow)] ?? S.weekdayCapacity?.[dow];
+    const base     = Math.min(windowH || 24, finiteNumber(weekdayBase, S.maxDailyHours || 8, 0, 24));
     const ratio    = getInt(dStr) / Math.max(1, S.baseline || 7);
     // Intensity can exceed baseline (ratio > 1) to allow more capacity.
     // Overwork is task-scoped and is applied while allocating an occurrence.
@@ -414,6 +431,8 @@ function expandTaskOccurrences(tasks, days) {
         priority:       task.priority || 'mandatory',
         dist:           task.dist === 'inherit' ? S.distribution : (task.dist || 'even'),
         notBefore:      task.notBefore || null,
+        splittable:     task.splittable !== false,
+        minBlockHours:  finiteNumber(task.minBlockHours, S.minBlockHours || 0.5, 0.25, 24),
         color:          task.color,
         name:           task.name,
       };
@@ -455,6 +474,8 @@ function expandTaskOccurrences(tasks, days) {
               priority:    task.priority || 'mandatory',
               dist:        task.dist === 'inherit' ? S.distribution : (task.dist || 'even'),
               notBefore:   task.notBefore || null,
+              splittable:  task.splittable !== false,
+              minBlockHours: finiteNumber(task.minBlockHours, S.minBlockHours || 0.5, 0.25, 24),
               repeat:      task.repeat,
               repeatDays:  task.repeatDays || [],
               color:       task.color,
@@ -652,7 +673,8 @@ function getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays) {
   while (cur <= deadline) {
     const dStr = ds(cur);
     const effectiveCap = (remainingCapacity[dStr] || 0) + (extraRemaining[dStr] || 0);
-    if (!excludedDays?.has(dStr) && occurrenceCanAllocateOn(occ, dStr) && effectiveCap > 0.001) {
+    const minBlock = Math.min(Math.max(0.25, +occ.minBlockHours || S.minBlockHours || 0.5), Math.max(0.25, +occ.hours || 0.25));
+    if (!excludedDays?.has(dStr) && occurrenceCanAllocateOn(occ, dStr) && effectiveCap + 0.001 >= minBlock) {
       days.push({ date: dStr, free: effectiveCap });
     }
     cur = addDays(cur, 1);
@@ -750,28 +772,67 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
     }
   }
 
+  if (occ.splittable === false && remaining > ALLOC_EPSILON) {
+    const eligible = getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays)
+      .filter(day => day.free + ALLOC_EPSILON >= remaining);
+    if (eligible.length) {
+      const weights = buildDayWeights(occ, eligible);
+      let chosen = eligible[0];
+      let best = -Infinity;
+      eligible.forEach((day, i) => {
+        const score = (weights[i] || 0) + (occ.dist === 'weighted' ? day.free / 100 : 0);
+        if (score > best) { best = score; chosen = day; }
+      });
+      const used = consumeCapacityForOccurrence(occ, chosen.date, remaining, remainingCapacity, extraRemaining);
+      if (used > 0.001) allocation[chosen.date] = (allocation[chosen.date] || 0) + used;
+      remaining -= used;
+    }
+  }
+
   let guard = 0;
-  while (remaining > ALLOC_EPSILON && guard++ < 1000) {
+  while (remaining > ALLOC_EPSILON && occ.splittable !== false && guard++ < 1000) {
     const eligible = getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays);
     if (!eligible.length) break;
 
-    const weights = buildDayWeights(occ, eligible);
+    const roundTarget = remaining;
+    const minBlock = Math.min(Math.max(0.25, +occ.minBlockHours || S.minBlockHours || 0.5), Math.max(0.25, roundTarget));
+    const maxBlocks = Math.max(1, Math.floor(roundTarget / minBlock));
+    let weightedDays = eligible.map((day, i) => ({
+      day,
+      weight: Math.max(0, buildDayWeights(occ, eligible)[i] || 0),
+    }));
+    if (weightedDays.length > maxBlocks) {
+      weightedDays = weightedDays
+        .sort((a, b) => (b.weight - a.weight) || (a.day.date < b.day.date ? -1 : 1))
+        .slice(0, maxBlocks);
+    }
+    while (weightedDays.length > 1) {
+      const total = weightedDays.reduce((s, entry) => s + entry.weight, 0);
+      const hasTinyShare = total > 0 && weightedDays.some(entry => (entry.weight / total) * roundTarget < minBlock - ALLOC_EPSILON);
+      if (!hasTinyShare) break;
+      weightedDays.sort((a, b) => (a.weight - b.weight) || (b.day.date < a.day.date ? -1 : 1)).shift();
+    }
+    weightedDays.sort((a, b) => a.day.date < b.day.date ? -1 : 1);
+    const candidateDays = weightedDays.map(entry => entry.day);
+    const weights = weightedDays.map(entry => entry.weight);
     const totalWeight = weights.reduce((s, w) => s + Math.max(0, w), 0);
     if (totalWeight <= 0) break;
 
-    const roundTarget = remaining;
     let allocatedThisRound = 0;
 
-    eligible.forEach((day, i) => {
+    candidateDays.forEach((day, i) => {
       if (remaining <= ALLOC_PROGRESS_EPSILON) return;
       const weight = Math.max(0, weights[i]);
       if (weight <= 0) return;
 
       const share = (weight / totalWeight) * roundTarget;
+      const requested = remaining > minBlock + ALLOC_EPSILON
+        ? Math.max(minBlock, share)
+        : remaining;
       const used = consumeCapacityForOccurrence(
         occ,
         day.date,
-        Math.min(share, day.free, remaining),
+        Math.min(requested, day.free, remaining),
         remainingCapacity,
         extraRemaining
       );
@@ -843,6 +904,19 @@ function allocateOccurrenceBatchConvergent(batch, remainingCapacity) {
   const totalNeeded = batch.reduce((s, occ) => s + (+occ.hours || 0), 0);
   const available = batchCapacityForOccurrences(batch, remainingCapacity);
   const constrained = available + ALLOC_EPSILON < totalNeeded;
+
+  if (batch.some(occ => occ.splittable === false)) {
+    batch.forEach(occ => {
+      const result = allocateOccurrenceConvergent(occ, remainingCapacity);
+      results[occ.occId] = {
+        allocation: result.allocation,
+        allocated: result.allocated,
+        shortfall: roundHours((+occ.hours || 0) - result.allocated),
+        fullyAllocated: (+occ.hours || 0) - result.allocated <= ALLOC_EPSILON,
+      };
+    });
+    return results;
+  }
 
   let quotaRemaining = constrained ? Math.max(0, available) : totalNeeded;
 
@@ -926,6 +1000,8 @@ function allocateSchedule() {
     intensities: S.intensities,
     baseline: S.baseline,
     maxDailyHours: S.maxDailyHours,
+    weekdayCapacity: S.weekdayCapacity,
+    minBlockHours: S.minBlockHours,
     taskOverworkAllowances: S.taskOverworkAllowances,
     manualOverrides: S.manualOverrides,
     taskLog: S.taskLog,
@@ -1911,6 +1987,18 @@ function toggleTaskLog(task, dStr, scheduledHrs) {
   showToast(S.taskLog[key]?.checked ? 'Marked done' : 'Marked not done');
 }
 
+function recordTaskCheckin(task, dStr, scheduledHrs, completedHrs) {
+  const completed = roundHours(Math.max(0, Math.min(+scheduledHrs || 0, +completedHrs || 0)));
+  S.taskLog[task.id + '|' + dStr] = {
+    scheduled: roundHours(scheduledHrs),
+    completed,
+    checked: completed >= (+scheduledHrs || 0) - ALLOC_EPSILON,
+  };
+  invalidatePlan();
+  save(); render();
+  showToast(completed >= scheduledHrs - ALLOC_EPSILON ? 'Marked done' : `${completed}h logged; the rest will be replanned`);
+}
+
 function taskCompletionState(task, dStr) {
   const entry = S.taskLog[task.id + '|' + dStr];
   const done = !!entry?.checked;
@@ -2491,6 +2579,8 @@ function renderSettings() {
   // Sync max daily hours
   const mdh = document.getElementById('settings-max-daily-hours');
   if (mdh) mdh.value = S.maxDailyHours || 8;
+  const minBlock = document.getElementById('settings-min-block');
+  if (minBlock) minBlock.value = S.minBlockHours || 0.5;
   renderProjectSettings();
 }
 
@@ -2596,6 +2686,8 @@ function saveWorkingHours() {
   S.dayEnd   = document.getElementById('settings-day-end').value;
   const mdh = document.getElementById('settings-max-daily-hours');
   if (mdh) S.maxDailyHours = Math.max(0.5, parseFloat(mdh.value) || 8);
+  const minBlock = document.getElementById('settings-min-block');
+  if (minBlock) S.minBlockHours = finiteNumber(minBlock.value, 0.5, 0.25, 24);
   save(); render();
   revalidateExistingTasks(true);
   showToast('Working hours saved');
@@ -2744,6 +2836,8 @@ function openModal(type, id) {
         document.getElementById('f-task-start-date').value = item.date || item.deadline || todayVal;
         document.getElementById('f-hours').value        = item.hours || 4;
         document.getElementById('f-dist').value         = item.dist     || 'inherit';
+        document.getElementById('f-min-block').value    = item.minBlockHours || S.minBlockHours || 0.5;
+        document.getElementById('f-splittable').checked = item.splittable !== false;
         document.getElementById('f-not-before').value    = item.notBefore || '';
         document.getElementById('f-task-repeat').value  = item.repeat || 'none';
         onTaskRepeatChange();
@@ -2790,6 +2884,8 @@ function openModal(type, id) {
     document.getElementById('f-priority').value       = 'mandatory';
     document.getElementById('f-hours').value          = 4;
     document.getElementById('f-dist').value           = 'inherit';
+    document.getElementById('f-min-block').value      = S.minBlockHours || 0.5;
+    document.getElementById('f-splittable').checked   = true;
     document.getElementById('f-not-before').value    = '';
     document.getElementById('f-start').value          = '09:00';
     document.getElementById('f-end').value            = '10:00';
@@ -2831,6 +2927,8 @@ function saveItem() {
       date:     document.getElementById('f-deadline').value,
       hours:    parseFloat(document.getElementById('f-hours').value) || 4,
       dist:       document.getElementById('f-dist').value,
+      minBlockHours: finiteNumber(document.getElementById('f-min-block').value, S.minBlockHours || 0.5, 0.25, 24),
+      splittable: document.getElementById('f-splittable').checked,
       notBefore:  document.getElementById('f-not-before').value || null,
       logged:   0,
       repeat:   repeatVal,
@@ -3590,6 +3688,7 @@ function maybeShowCheckin() {
         <div class="ci-accent" style="background:${safeColor(task.color)}"></div>
         <div class="ci-name">${escapeHtml(task.name)}</div>
         <div class="ci-scheduled">${hrs}h scheduled</div>
+        <label class="ci-completed"><span>Completed</span><input type="number" min="0" max="${hrs}" step="0.25" value="${completed}" oninput="updateCheckinCompletion(this)"><span>h</span></label>
       </div>`;
 
     if (completed >= hrs) {
@@ -3602,15 +3701,32 @@ function maybeShowCheckin() {
   document.getElementById('checkin-bg').classList.remove('hidden');
 }
 
+function setCheckinRowCompletion(row, completed) {
+  const hrs = parseFloat(row.dataset.scheduled) || 0;
+  const value = roundHours(Math.max(0, Math.min(hrs, +completed || 0)));
+  row.dataset.completed = value;
+  const input = row.querySelector('.ci-completed input');
+  if (input) input.value = value;
+  const done = value >= hrs - ALLOC_EPSILON;
+  const check = row.querySelector('.ci-check');
+  if (check) {
+    check.classList.toggle('checked', done);
+    check.textContent = done ? '✓' : '';
+  }
+  row.querySelector('.ci-row')?.classList.toggle('done', done);
+}
+
+function updateCheckinCompletion(input) {
+  const row = input.closest('.checkin-task-item');
+  if (!row) return;
+  setCheckinRowCompletion(row, input.value);
+}
+
 function toggleCheckinItem(checkEl) {
   const row   = checkEl.closest('.checkin-task-item');
   const hrs   = parseFloat(row.dataset.scheduled);
   const isNowChecked = !checkEl.classList.contains('checked');
-
-  checkEl.classList.toggle('checked', isNowChecked);
-  checkEl.textContent = isNowChecked ? '✓' : '';
-  row.querySelector('.ci-row').classList.toggle('done', isNowChecked);
-  row.dataset.completed = isNowChecked ? hrs : 0;
+  setCheckinRowCompletion(row, isNowChecked ? hrs : 0);
 }
 
 function submitCheckin() {
@@ -3619,9 +3735,11 @@ function submitCheckin() {
 
   document.querySelectorAll('.checkin-task-item').forEach(item => {
     const key       = item.dataset.key;
-    const scheduled = parseFloat(item.dataset.scheduled);
-    const checked   = item.querySelector('.ci-check').classList.contains('checked');
-    S.taskLog[key]  = { scheduled, completed: checked ? scheduled : 0, checked };
+    const scheduled = roundHours(parseFloat(item.dataset.scheduled));
+    const inputCompleted = item.querySelector('.ci-completed input')?.value ?? item.dataset.completed;
+    const completed = roundHours(Math.max(0, Math.min(scheduled, parseFloat(inputCompleted) || 0)));
+    const checked = completed >= scheduled - ALLOC_EPSILON;
+    S.taskLog[key]  = { scheduled, completed, checked };
   });
 
   S.lastCheckinDate = todayStr;

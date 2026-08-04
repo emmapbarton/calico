@@ -1040,6 +1040,19 @@ test('v0.1 ux: day view items and search cover tasks events and projects', () =>
   assert.equal(searchMatches('day event')[0].type, 'event');
 });
 
+test('cloud sync payload omits bearer tokens', () => {
+  resetState({ cloud: { endpoint: 'https://example.test/state', token: 'secret-token' } });
+  const state = stateForCloudSync();
+  assert.equal(state.cloud.endpoint, 'https://example.test/state');
+  assert.equal(Object.hasOwn(state.cloud, 'token'), false);
+});
+
+test('cloud load validation rejects non-Calico documents', () => {
+  assert.equal(isCalicoStateDocument({}), false);
+  assert.equal(isCalicoStateDocument({ tasks: [], events: [] }), true);
+  assert.equal(isCalicoStateDocument({ state: { tasks: [], events: [] } }), false);
+});
+
 JSON.stringify(results);
 `;
 

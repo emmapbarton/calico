@@ -73,6 +73,11 @@ function finiteNumber(value, fallback, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+function isCalicoStateDocument(candidate) {
+  return !!(candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    && Array.isArray(candidate.tasks) && Array.isArray(candidate.events));
+}
+
 function normalizeState(input) {
   const raw = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
   const next = {
@@ -250,7 +255,7 @@ async function importDataFile(input) {
   try {
     const parsed = JSON.parse(await file.text());
     const candidate = parsed.state || parsed;
-    if (!candidate || !Array.isArray(candidate.tasks) || !Array.isArray(candidate.events)) {
+    if (!isCalicoStateDocument(candidate)) {
       throw new Error('This is not a Calico backup.');
     }
     if (!confirm('Replace the current Calico data with this backup?')) return;
@@ -285,6 +290,12 @@ function queueCloudSave() {
   clearTimeout(_cloudSaveTimer);
   _cloudSaveTimer = setTimeout(() => syncCloudNow(true), 600);
 }
+function stateForCloudSync() {
+  const state = normalizeState(S);
+  state.cloud = { ...state.cloud };
+  delete state.cloud.token;
+  return state;
+}
 async function syncCloudNow(silent = false) {
   if (!cloudConfigured()) {
     if (!silent) showToast('Add an HTTPS cloud endpoint first.');
@@ -293,7 +304,7 @@ async function syncCloudNow(silent = false) {
   if (_cloudSyncing || typeof fetch !== 'function') return false;
   _cloudSyncing = true;
   try {
-    const payload = { state: normalizeState(S), updatedAt: new Date().toISOString() };
+    const payload = { state: stateForCloudSync(), updatedAt: new Date().toISOString() };
     const response = await fetch(S.cloud.endpoint, { method: 'PUT', headers: cloudHeaders(), body: JSON.stringify(payload) });
     if (!response.ok) throw new Error(`Cloud save failed (${response.status})`);
     S.cloud.lastSyncAt = new Date().toISOString();
@@ -319,10 +330,15 @@ async function loadCloudState() {
     if (response.status === 404) return syncCloudNow(true);
     if (!response.ok) throw new Error(`Cloud load failed (${response.status})`);
     const parsed = await response.json();
-    const remote = normalizeState(parsed.state || parsed);
+    const candidate = parsed.state || parsed;
+    if (!isCalicoStateDocument(candidate)) {
+      throw new Error('This is not a Calico backup.');
+    }
+    const remote = normalizeState(candidate);
+    const localCloud = { ...S.cloud };
     const replace = confirm('Cloud data is available. Replace this device with the cloud copy? Choose Cancel to keep local data and upload it.');
     if (replace) S = remote;
-    S.cloud = { ...S.cloud, endpoint: S.cloud.endpoint, token: S.cloud.token, lastSyncAt: new Date().toISOString(), lastError: '' };
+    S.cloud = { ...S.cloud, endpoint: localCloud.endpoint, token: localCloud.token, lastSyncAt: new Date().toISOString(), lastError: '' };
     invalidatePlan();
     localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
     render();

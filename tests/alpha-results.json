@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-08-04T20:37:29.713Z",
-  "total": 56,
-  "passed": 56,
+  "generatedAt": "2026-08-04T20:49:10.225Z",
+  "total": 58,
+  "passed": 58,
   "failed": 0,
   "results": [
     {
@@ -226,6 +226,14 @@
     },
     {
       "name": "v0.1 ux: day view items and search cover tasks events and projects",
+      "status": "PASS"
+    },
+    {
+      "name": "cloud sync payload omits bearer tokens",
+      "status": "PASS"
+    },
+    {
+      "name": "cloud load validation rejects non-Calico documents",
       "status": "PASS"
     }
   ]

@@ -950,6 +950,47 @@ test('v0.1 malformed capacity settings normalize safely', () => {
   assert.equal(state.splitTasks, false);
 });
 
+
+test('review: constrained batch keeps non-splittable tasks whole', () => {
+  resetState({ maxDailyHours: 4, tasks: [
+    makeTask('whole-a', 3, 0, { splittable: false }),
+    makeTask('whole-b', 3, 0, { splittable: false }),
+  ] });
+  const plan = allocateSchedule();
+  const totals = ['whole-a', 'whole-b'].map(id => total(plan, id)).sort((a, b) => a - b);
+  assert.deepEqual(totals, [0, 3]);
+  assert.equal(plan.conflicts['whole-a'] || plan.conflicts['whole-b'] ? true : false, true);
+});
+
+test('review: min block is enforced on every automatic allocation chunk', () => {
+  resetState({ maxDailyHours: 8, minBlockHours: 1, tasks: [makeTask('chunk-min', 2, 2)] });
+  const allocation = allocateSchedule().allocations['chunk-min'];
+  assert.equal(Object.values(allocation).length, 2);
+  Object.values(allocation).forEach(hours => assert.ok(hours >= 1, JSON.stringify(allocation)));
+});
+
+test('review: submitCheckin records partial completed hours from the UI input', () => {
+  resetState({ tasks: [] });
+  const oldQuery = document.querySelectorAll;
+  const oldGet = document.getElementById;
+  const item = {
+    dataset: { key: 'ui-partial|' + ds(addDays(today(), -1)), scheduled: '4', completed: '1.5' },
+    querySelector(selector) {
+      if (selector === '.ci-completed input') return { value: '1.5' };
+      if (selector === '.ci-check') return { classList: { contains() { return false; } } };
+      return null;
+    },
+  };
+  document.querySelectorAll = selector => selector === '.checkin-task-item' ? [item] : [];
+  document.getElementById = id => id === 'checkin-bg'
+    ? { classList: { add() {} } }
+    : element;
+  withInteractionStubs(() => submitCheckin());
+  document.querySelectorAll = oldQuery;
+  document.getElementById = oldGet;
+  assert.deepEqual(S.taskLog[item.dataset.key], { scheduled: 4, completed: 1.5, checked: false });
+});
+
 JSON.stringify(results);
 `;
 

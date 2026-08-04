@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-08-04T19:48:07.874Z",
-  "total": 50,
-  "passed": 50,
+  "generatedAt": "2026-08-04T20:05:04.699Z",
+  "total": 53,
+  "passed": 53,
   "failed": 0,
   "results": [
     {
@@ -202,6 +202,18 @@
     },
     {
       "name": "v0.1 malformed capacity settings normalize safely",
+      "status": "PASS"
+    },
+    {
+      "name": "review: constrained batch keeps non-splittable tasks whole",
+      "status": "PASS"
+    },
+    {
+      "name": "review: min block is enforced on every automatic allocation chunk",
+      "status": "PASS"
+    },
+    {
+      "name": "review: submitCheckin records partial completed hours from the UI input",
       "status": "PASS"
     }
   ]

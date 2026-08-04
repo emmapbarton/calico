@@ -794,23 +794,45 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
     const eligible = getEligibleDays(occ, remainingCapacity, extraRemaining, excludedDays);
     if (!eligible.length) break;
 
-    const weights = buildDayWeights(occ, eligible);
+    const roundTarget = remaining;
+    const minBlock = Math.min(Math.max(0.25, +occ.minBlockHours || S.minBlockHours || 0.5), Math.max(0.25, roundTarget));
+    const maxBlocks = Math.max(1, Math.floor(roundTarget / minBlock));
+    let weightedDays = eligible.map((day, i) => ({
+      day,
+      weight: Math.max(0, buildDayWeights(occ, eligible)[i] || 0),
+    }));
+    if (weightedDays.length > maxBlocks) {
+      weightedDays = weightedDays
+        .sort((a, b) => (b.weight - a.weight) || (a.day.date < b.day.date ? -1 : 1))
+        .slice(0, maxBlocks);
+    }
+    while (weightedDays.length > 1) {
+      const total = weightedDays.reduce((s, entry) => s + entry.weight, 0);
+      const hasTinyShare = total > 0 && weightedDays.some(entry => (entry.weight / total) * roundTarget < minBlock - ALLOC_EPSILON);
+      if (!hasTinyShare) break;
+      weightedDays.sort((a, b) => (a.weight - b.weight) || (b.day.date < a.day.date ? -1 : 1)).shift();
+    }
+    weightedDays.sort((a, b) => a.day.date < b.day.date ? -1 : 1);
+    const candidateDays = weightedDays.map(entry => entry.day);
+    const weights = weightedDays.map(entry => entry.weight);
     const totalWeight = weights.reduce((s, w) => s + Math.max(0, w), 0);
     if (totalWeight <= 0) break;
 
-    const roundTarget = remaining;
     let allocatedThisRound = 0;
 
-    eligible.forEach((day, i) => {
+    candidateDays.forEach((day, i) => {
       if (remaining <= ALLOC_PROGRESS_EPSILON) return;
       const weight = Math.max(0, weights[i]);
       if (weight <= 0) return;
 
       const share = (weight / totalWeight) * roundTarget;
+      const requested = remaining > minBlock + ALLOC_EPSILON
+        ? Math.max(minBlock, share)
+        : remaining;
       const used = consumeCapacityForOccurrence(
         occ,
         day.date,
-        Math.min(share, day.free, remaining),
+        Math.min(requested, day.free, remaining),
         remainingCapacity,
         extraRemaining
       );
@@ -882,6 +904,19 @@ function allocateOccurrenceBatchConvergent(batch, remainingCapacity) {
   const totalNeeded = batch.reduce((s, occ) => s + (+occ.hours || 0), 0);
   const available = batchCapacityForOccurrences(batch, remainingCapacity);
   const constrained = available + ALLOC_EPSILON < totalNeeded;
+
+  if (batch.some(occ => occ.splittable === false)) {
+    batch.forEach(occ => {
+      const result = allocateOccurrenceConvergent(occ, remainingCapacity);
+      results[occ.occId] = {
+        allocation: result.allocation,
+        allocated: result.allocated,
+        shortfall: roundHours((+occ.hours || 0) - result.allocated),
+        fullyAllocated: (+occ.hours || 0) - result.allocated <= ALLOC_EPSILON,
+      };
+    });
+    return results;
+  }
 
   let quotaRemaining = constrained ? Math.max(0, available) : totalNeeded;
 
@@ -3653,6 +3688,7 @@ function maybeShowCheckin() {
         <div class="ci-accent" style="background:${safeColor(task.color)}"></div>
         <div class="ci-name">${escapeHtml(task.name)}</div>
         <div class="ci-scheduled">${hrs}h scheduled</div>
+        <label class="ci-completed"><span>Completed</span><input type="number" min="0" max="${hrs}" step="0.25" value="${completed}" oninput="updateCheckinCompletion(this)"><span>h</span></label>
       </div>`;
 
     if (completed >= hrs) {
@@ -3665,15 +3701,32 @@ function maybeShowCheckin() {
   document.getElementById('checkin-bg').classList.remove('hidden');
 }
 
+function setCheckinRowCompletion(row, completed) {
+  const hrs = parseFloat(row.dataset.scheduled) || 0;
+  const value = roundHours(Math.max(0, Math.min(hrs, +completed || 0)));
+  row.dataset.completed = value;
+  const input = row.querySelector('.ci-completed input');
+  if (input) input.value = value;
+  const done = value >= hrs - ALLOC_EPSILON;
+  const check = row.querySelector('.ci-check');
+  if (check) {
+    check.classList.toggle('checked', done);
+    check.textContent = done ? '✓' : '';
+  }
+  row.querySelector('.ci-row')?.classList.toggle('done', done);
+}
+
+function updateCheckinCompletion(input) {
+  const row = input.closest('.checkin-task-item');
+  if (!row) return;
+  setCheckinRowCompletion(row, input.value);
+}
+
 function toggleCheckinItem(checkEl) {
   const row   = checkEl.closest('.checkin-task-item');
   const hrs   = parseFloat(row.dataset.scheduled);
   const isNowChecked = !checkEl.classList.contains('checked');
-
-  checkEl.classList.toggle('checked', isNowChecked);
-  checkEl.textContent = isNowChecked ? '✓' : '';
-  row.querySelector('.ci-row').classList.toggle('done', isNowChecked);
-  row.dataset.completed = isNowChecked ? hrs : 0;
+  setCheckinRowCompletion(row, isNowChecked ? hrs : 0);
 }
 
 function submitCheckin() {
@@ -3682,9 +3735,11 @@ function submitCheckin() {
 
   document.querySelectorAll('.checkin-task-item').forEach(item => {
     const key       = item.dataset.key;
-    const scheduled = parseFloat(item.dataset.scheduled);
-    const checked   = item.querySelector('.ci-check').classList.contains('checked');
-    S.taskLog[key]  = { scheduled, completed: checked ? scheduled : 0, checked };
+    const scheduled = roundHours(parseFloat(item.dataset.scheduled));
+    const inputCompleted = item.querySelector('.ci-completed input')?.value ?? item.dataset.completed;
+    const completed = roundHours(Math.max(0, Math.min(scheduled, parseFloat(inputCompleted) || 0)));
+    const checked = completed >= scheduled - ALLOC_EPSILON;
+    S.taskLog[key]  = { scheduled, completed, checked };
   });
 
   S.lastCheckinDate = todayStr;

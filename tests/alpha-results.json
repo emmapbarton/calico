@@ -1,0 +1,232 @@
+{
+  "generatedAt": "2026-08-04T20:37:29.713Z",
+  "total": 56,
+  "passed": 56,
+  "failed": 0,
+  "results": [
+    {
+      "name": "legacy single-task pins migrate to occurrence overrides",
+      "status": "PASS"
+    },
+    {
+      "name": "skip exclusion preserves all hours when later capacity exists",
+      "status": "PASS"
+    },
+    {
+      "name": "deadline-day skip remains a visible shortfall",
+      "status": "PASS"
+    },
+    {
+      "name": "repeating occurrence override does not bleed into the next occurrence",
+      "status": "PASS"
+    },
+    {
+      "name": "current-day unchecked log cannot inflate a repeating occurrence",
+      "status": "PASS"
+    },
+    {
+      "name": "dragged weekly task with weekday events remains capped at requested hours",
+      "status": "PASS"
+    },
+    {
+      "name": "genuine past missed work still carries forward",
+      "status": "PASS"
+    },
+    {
+      "name": "user-entered HTML is escaped before rendering",
+      "status": "PASS"
+    },
+    {
+      "name": "daily reduction locks the chosen amount and redistributes the remainder",
+      "status": "PASS"
+    },
+    {
+      "name": "daily increase pulls hours from automatic days without changing task total",
+      "status": "PASS"
+    },
+    {
+      "name": "an impossible user lock remains stored and reports a constraint conflict",
+      "status": "PASS"
+    },
+    {
+      "name": "releasing one fixed day returns it to automatic scheduling",
+      "status": "PASS"
+    },
+    {
+      "name": "ordinary task edits preserve valid user-controlled days",
+      "status": "PASS"
+    },
+    {
+      "name": "past intensity is historical while today and future remain editable",
+      "status": "PASS"
+    },
+    {
+      "name": "completion state exposes the same action in every view",
+      "status": "PASS"
+    },
+    {
+      "name": "week task blocks render completion controls without a scope error",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 1: twenty repeated drags never change the requested total",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 2: moving a visually split day moves the full day allocation once",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 3: occupied target keeps the user move and exposes the shortfall",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 4: drag before not-before, after deadline, and into past is rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 5: dragging one weekly occurrence leaves the next untouched",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 6: repeated skip preserves demand until no later capacity exists",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 7: skip on deadline day remains fixed at zero with a visible shortfall",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 8: skip with all later days blocked keeps the skip and flags demand",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 9: done and not-done cycling cannot create demand",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 10: partial past completion carries forward once, not repeatedly",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 11: completion on one repeating date does not alter later occurrences",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 12: completion, drag, and uncheck do not duplicate hours",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 13: constrained drag stays authoritative without stealing extra capacity",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 14: priority cascade returns one hard/soft schedule summary",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 15: failed conflict proposals leave application state byte-for-byte unchanged",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 16: edited overwork is removed and never inherited by another task",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 17: repeating event add, edit, and delete revalidate all affected days",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 18: complex state survives repeated backup and restore identically",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 19: navigation and render-only state cannot alter allocation",
+      "status": "PASS"
+    },
+    {
+      "name": "stress 20: 150 tasks and 50 repeating events remain finite and deterministic",
+      "status": "PASS"
+    },
+    {
+      "name": "projects migrate defensively and orphaned task assignments become unassigned",
+      "status": "PASS"
+    },
+    {
+      "name": "project visibility filters never change canonical allocation",
+      "status": "PASS"
+    },
+    {
+      "name": "project metadata survives repeated backup normalization without plan drift",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 weekday capacity overrides change schedulable workload",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 working-hours window caps daily capacity",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 minimum preferred block duration avoids too-small days",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 non-splittable task schedules as one block when a day can fit",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 non-splittable task reports shortfall when no single day can fit",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 partial check-in carries only unfinished work forward",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 front-loaded strategy places at least as much today as deadline day",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 back-loaded strategy places at least as much on deadline as today",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 free-time weighted strategy favors the freer day",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 twenty hours due next Friday repairs sensibly after Tuesday is missed",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 malformed capacity settings normalize safely",
+      "status": "PASS"
+    },
+    {
+      "name": "review: constrained batch keeps non-splittable tasks whole",
+      "status": "PASS"
+    },
+    {
+      "name": "review: min block is enforced on every automatic allocation chunk",
+      "status": "PASS"
+    },
+    {
+      "name": "review: submitCheckin records partial completed hours from the UI input",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 audit: mixed mandatory and optional constrained batch is deterministic and capacity safe",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 audit: partial carry-forward and pins conserve demand",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 ux: day view items and search cover tasks events and projects",
+      "status": "PASS"
+    }
+  ]
+}

@@ -856,6 +856,190 @@ test('project metadata survives repeated backup normalization without plan drift
   assert.equal(JSON.stringify(allocateSchedule()), beforePlan);
 });
 
+
+test('v0.1 weekday capacity overrides change schedulable workload', () => {
+  const monday = ds(addDays(today(), 1));
+  resetState({ maxDailyHours: 8, weekdayCapacity: { '1': 2 }, tasks: [makeTask('weekday-cap', 8, 1, { notBefore: monday })] });
+  const plan = allocateSchedule();
+  assert.equal(plan.dailyCapacity[monday], 2);
+  assert.equal(total(plan, 'weekday-cap'), 2);
+  assert.equal(plan.conflicts['weekday-cap'].shortfall, 6);
+});
+
+test('v0.1 working-hours window caps daily capacity', () => {
+  resetState({ maxDailyHours: 8, dayStart: '09:00', dayEnd: '12:00', tasks: [makeTask('window-cap', 8, 0)] });
+  const plan = allocateSchedule();
+  assert.equal(plan.dailyCapacity[ds(today())], 3);
+  assert.equal(total(plan, 'window-cap'), 3);
+});
+
+test('v0.1 minimum preferred block duration avoids too-small days', () => {
+  resetState({ maxDailyHours: 8, minBlockHours: 1, tasks: [makeTask('min-block', 2, 1)], events: [{
+    id: 'tiny-left', type: 'event', name: 'Tiny left', date: ds(today()), start: '09:00', end: '16:30', repeat: 'none', color: '#111111'
+  }] });
+  const plan = allocateSchedule();
+  assert.equal(plan.dailyFree[ds(today())], 0.5);
+  assert.equal(plan.allocations['min-block'][ds(today())] || 0, 0);
+  assert.equal(plan.allocations['min-block'][ds(addDays(today(), 1))], 2);
+});
+
+test('v0.1 non-splittable task schedules as one block when a day can fit', () => {
+  resetState({ maxDailyHours: 4, tasks: [makeTask('one-block', 3, 2, { splittable: false })] });
+  const alloc = allocateSchedule().allocations['one-block'];
+  assert.equal(Object.keys(alloc).length, 1);
+  assert.equal(total(allocateSchedule(), 'one-block'), 3);
+});
+
+test('v0.1 non-splittable task reports shortfall when no single day can fit', () => {
+  resetState({ maxDailyHours: 2, tasks: [makeTask('too-large-one-block', 3, 2, { splittable: false })] });
+  const plan = allocateSchedule();
+  assert.equal(total(plan, 'too-large-one-block'), 0);
+  assert.equal(plan.conflicts['too-large-one-block'].shortfall, 3);
+});
+
+test('v0.1 partial check-in carries only unfinished work forward', () => {
+  const task = makeTask('partial-checkin', 5, 1);
+  resetState({ tasks: [task] });
+  withInteractionStubs(() => {
+    recordTaskCheckin(task, ds(addDays(today(), -1)), 4, 1.5);
+  });
+  const plan = allocateSchedule();
+  assert.equal(total(plan, 'partial-checkin'), 7.5);
+});
+
+test('v0.1 front-loaded strategy places at least as much today as deadline day', () => {
+  resetState({ maxDailyHours: 8, tasks: [makeTask('front-load', 6, 2, { dist: 'front' })] });
+  const alloc = allocateSchedule().allocations['front-load'];
+  assert.ok((alloc[ds(today())] || 0) >= (alloc[ds(addDays(today(), 2))] || 0));
+});
+
+test('v0.1 back-loaded strategy places at least as much on deadline as today', () => {
+  resetState({ maxDailyHours: 8, tasks: [makeTask('back-load', 6, 2, { dist: 'back' })] });
+  const alloc = allocateSchedule().allocations['back-load'];
+  assert.ok((alloc[ds(addDays(today(), 2))] || 0) >= (alloc[ds(today())] || 0));
+});
+
+test('v0.1 free-time weighted strategy favors the freer day', () => {
+  resetState({ maxDailyHours: 8, tasks: [makeTask('weighted-load', 4, 1, { dist: 'weighted' })], events: [{
+    id: 'today-busy', type: 'event', name: 'Busy', date: ds(today()), start: '09:00', end: '15:00', repeat: 'none', color: '#111111'
+  }] });
+  const alloc = allocateSchedule().allocations['weighted-load'];
+  assert.ok((alloc[ds(addDays(today(), 1))] || 0) > (alloc[ds(today())] || 0));
+});
+
+test('v0.1 twenty hours due next Friday repairs sensibly after Tuesday is missed', () => {
+  const friday = ds(addDays(weekStartDate(0), 11));
+  const tuesday = ds(addDays(weekStartDate(0), 2));
+  resetState({ maxDailyHours: 6, tasks: [makeTask('success-case', 20, 12, { deadline: friday, date: friday, notBefore: ds(weekStartDate(0)) })] });
+  const before = allocateSchedule();
+  const missed = before.allocations['success-case'][tuesday] || 0;
+  S.taskLog['success-case|' + tuesday] = { scheduled: missed, completed: 0, checked: false };
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(roundHours(total(after, 'success-case')), roundHours(20 + missed));
+  assert.ok((after.allocations['success-case'][ds(addDays(parseDate(tuesday), 1))] || 0) <= 6);
+  assert.equal(after.conflicts['success-case'], undefined);
+});
+
+
+test('v0.1 malformed capacity settings normalize safely', () => {
+  const state = normalizeState({ weekdayCapacity: { '1': 'bad', '2': 30 }, minBlockHours: -4, splitTasks: false, tasks: [], events: [] });
+  assert.equal(state.weekdayCapacity['1'], 8);
+  assert.equal(state.weekdayCapacity['2'], 24);
+  assert.equal(state.minBlockHours, 0.25);
+  assert.equal(state.splitTasks, false);
+});
+
+
+test('review: constrained batch keeps non-splittable tasks whole', () => {
+  resetState({ maxDailyHours: 4, tasks: [
+    makeTask('whole-a', 3, 0, { splittable: false }),
+    makeTask('whole-b', 3, 0, { splittable: false }),
+  ] });
+  const plan = allocateSchedule();
+  const totals = ['whole-a', 'whole-b'].map(id => total(plan, id)).sort((a, b) => a - b);
+  assert.deepEqual(totals, [0, 3]);
+  assert.equal(plan.conflicts['whole-a'] || plan.conflicts['whole-b'] ? true : false, true);
+});
+
+test('review: min block is enforced on every automatic allocation chunk', () => {
+  resetState({ maxDailyHours: 8, minBlockHours: 1, tasks: [makeTask('chunk-min', 2, 2)] });
+  const allocation = allocateSchedule().allocations['chunk-min'];
+  assert.equal(Object.values(allocation).length, 2);
+  Object.values(allocation).forEach(hours => assert.ok(hours >= 1, JSON.stringify(allocation)));
+});
+
+test('review: submitCheckin records partial completed hours from the UI input', () => {
+  resetState({ tasks: [] });
+  const oldQuery = document.querySelectorAll;
+  const oldGet = document.getElementById;
+  const item = {
+    dataset: { key: 'ui-partial|' + ds(addDays(today(), -1)), scheduled: '4', completed: '1.5' },
+    querySelector(selector) {
+      if (selector === '.ci-completed input') return { value: '1.5' };
+      if (selector === '.ci-check') return { classList: { contains() { return false; } } };
+      return null;
+    },
+  };
+  document.querySelectorAll = selector => selector === '.checkin-task-item' ? [item] : [];
+  document.getElementById = id => id === 'checkin-bg'
+    ? { classList: { add() {} } }
+    : element;
+  withInteractionStubs(() => submitCheckin());
+  document.querySelectorAll = oldQuery;
+  document.getElementById = oldGet;
+  assert.deepEqual(S.taskLog[item.dataset.key], { scheduled: 4, completed: 1.5, checked: false });
+});
+
+
+test('v0.1 audit: mixed mandatory and optional constrained batch is deterministic and capacity safe', () => {
+  const tomorrow = ds(addDays(today(), 1));
+  resetState({
+    maxDailyHours: 4,
+    weekdayCapacity: { [String(parseDate(tomorrow).getDay())]: 2 },
+    tasks: [
+      makeTask('audit-whole', 3, 1, { splittable: false }),
+      makeTask('audit-split', 8, 1, { minBlockHours: 1 }),
+      makeTask('audit-optional', 5, 1, { priority: 'optional' }),
+    ],
+  });
+  const first = allocateSchedule();
+  const second = allocateSchedule();
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  assert.equal(roundHours((first.dailyUsed[ds(today())] || 0) + (first.dailyUsed[tomorrow] || 0)), 6);
+  assert.equal(total(first, 'audit-whole'), 3);
+  assert.equal(roundHours(total(first, 'audit-split') + first.conflicts['audit-split'].shortfall), 8);
+  assert.equal(total(first, 'audit-optional'), 0);
+  assert.equal(first.conflicts['audit-optional'].type, 'soft');
+});
+
+test('v0.1 audit: partial carry-forward and pins conserve demand', () => {
+  const task = makeTask('audit-partial-pinned', 6, 2);
+  resetState({ maxDailyHours: 4, tasks: [task], taskLog: {
+    ['audit-partial-pinned|' + ds(addDays(today(), -1))]: { scheduled: 3, completed: 1, checked: false },
+  } });
+  const plan = allocateSchedule();
+  const occ = plan.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 2);
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(after.allocations['audit-partial-pinned'][ds(today())], 2);
+  assert.equal(roundHours(total(after, 'audit-partial-pinned') + (after.conflicts['audit-partial-pinned']?.shortfall || 0)), 8);
+});
+
+
+test('v0.1 ux: day view items and search cover tasks events and projects', () => {
+  resetState({
+    projects: [{ id: 'launch-project', name: 'Launch Project', color: '#2e6b4f' }],
+    tasks: [makeTask('day-task', 2, 0, { name: 'Day Task', projectId: 'launch-project' })],
+    events: [{ id: 'day-event', type: 'event', name: 'Day Event', date: ds(today()), start: '10:00', end: '11:00', repeat: 'none', color: '#111111' }],
+  });
+  const items = dayScheduleItems(ds(today()));
+  assert.equal(items.length, 2);
+  assert.deepEqual(searchMatches('launch').map(hit => hit.type).sort(), ['project', 'task']);
+  assert.equal(searchMatches('day event')[0].type, 'event');
+});
+
 JSON.stringify(results);
 `;
 
@@ -897,6 +1081,7 @@ const context = {
 };
 
 const results = JSON.parse(vm.runInNewContext(appCode + suite, context, { timeout: 10000 }));
+fs.writeFileSync(new URL('./alpha-results.json', import.meta.url), JSON.stringify({ generatedAt: new Date().toISOString(), total: results.length, passed: results.filter(r => r.status === 'PASS').length, failed: results.filter(r => r.status !== 'PASS').length, results }, null, 2));
 for (const result of results) {
   console.log(`${result.status} ${result.name}${result.error ? ': ' + result.error : ''}`);
 }

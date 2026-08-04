@@ -1640,3 +1640,13 @@ body {
   .mobile-nav-btn.active { color: var(--white); }
   .mobile-nav-add { color: #ffb08f; }
 }
+
+.check-field {
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.check-field input[type="checkbox"] {
+  width: auto;
+  margin-top: 0.35rem;
+}

@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-08-04T20:05:04.699Z",
-  "total": 53,
-  "passed": 53,
+  "generatedAt": "2026-08-04T20:49:10.225Z",
+  "total": 58,
+  "passed": 58,
   "failed": 0,
   "results": [
     {
@@ -214,6 +214,26 @@
     },
     {
       "name": "review: submitCheckin records partial completed hours from the UI input",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 audit: mixed mandatory and optional constrained batch is deterministic and capacity safe",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 audit: partial carry-forward and pins conserve demand",
+      "status": "PASS"
+    },
+    {
+      "name": "v0.1 ux: day view items and search cover tasks events and projects",
+      "status": "PASS"
+    },
+    {
+      "name": "cloud sync payload omits bearer tokens",
+      "status": "PASS"
+    },
+    {
+      "name": "cloud load validation rejects non-Calico documents",
       "status": "PASS"
     }
   ]

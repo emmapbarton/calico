@@ -991,6 +991,68 @@ test('review: submitCheckin records partial completed hours from the UI input', 
   assert.deepEqual(S.taskLog[item.dataset.key], { scheduled: 4, completed: 1.5, checked: false });
 });
 
+
+test('v0.1 audit: mixed mandatory and optional constrained batch is deterministic and capacity safe', () => {
+  const tomorrow = ds(addDays(today(), 1));
+  resetState({
+    maxDailyHours: 4,
+    weekdayCapacity: { [String(parseDate(tomorrow).getDay())]: 2 },
+    tasks: [
+      makeTask('audit-whole', 3, 1, { splittable: false }),
+      makeTask('audit-split', 8, 1, { minBlockHours: 1 }),
+      makeTask('audit-optional', 5, 1, { priority: 'optional' }),
+    ],
+  });
+  const first = allocateSchedule();
+  const second = allocateSchedule();
+  assert.equal(JSON.stringify(first), JSON.stringify(second));
+  assert.equal(roundHours((first.dailyUsed[ds(today())] || 0) + (first.dailyUsed[tomorrow] || 0)), 6);
+  assert.equal(total(first, 'audit-whole'), 3);
+  assert.equal(roundHours(total(first, 'audit-split') + first.conflicts['audit-split'].shortfall), 8);
+  assert.equal(total(first, 'audit-optional'), 0);
+  assert.equal(first.conflicts['audit-optional'].type, 'soft');
+});
+
+test('v0.1 audit: partial carry-forward and pins conserve demand', () => {
+  const task = makeTask('audit-partial-pinned', 6, 2);
+  resetState({ maxDailyHours: 4, tasks: [task], taskLog: {
+    ['audit-partial-pinned|' + ds(addDays(today(), -1))]: { scheduled: 3, completed: 1, checked: false },
+  } });
+  const plan = allocateSchedule();
+  const occ = plan.occurrences.find(candidate => candidate.taskId === task.id);
+  setDayConstraint(occ, ds(today()), 2);
+  invalidatePlan();
+  const after = allocateSchedule();
+  assert.equal(after.allocations['audit-partial-pinned'][ds(today())], 2);
+  assert.equal(roundHours(total(after, 'audit-partial-pinned') + (after.conflicts['audit-partial-pinned']?.shortfall || 0)), 8);
+});
+
+
+test('v0.1 ux: day view items and search cover tasks events and projects', () => {
+  resetState({
+    projects: [{ id: 'launch-project', name: 'Launch Project', color: '#2e6b4f' }],
+    tasks: [makeTask('day-task', 2, 0, { name: 'Day Task', projectId: 'launch-project' })],
+    events: [{ id: 'day-event', type: 'event', name: 'Day Event', date: ds(today()), start: '10:00', end: '11:00', repeat: 'none', color: '#111111' }],
+  });
+  const items = dayScheduleItems(ds(today()));
+  assert.equal(items.length, 2);
+  assert.deepEqual(searchMatches('launch').map(hit => hit.type).sort(), ['project', 'task']);
+  assert.equal(searchMatches('day event')[0].type, 'event');
+});
+
+test('cloud sync payload omits bearer tokens', () => {
+  resetState({ cloud: { endpoint: 'https://example.test/state', token: 'secret-token' } });
+  const state = stateForCloudSync();
+  assert.equal(state.cloud.endpoint, 'https://example.test/state');
+  assert.equal(Object.hasOwn(state.cloud, 'token'), false);
+});
+
+test('cloud load validation rejects non-Calico documents', () => {
+  assert.equal(isCalicoStateDocument({}), false);
+  assert.equal(isCalicoStateDocument({ tasks: [], events: [] }), true);
+  assert.equal(isCalicoStateDocument({ state: { tasks: [], events: [] } }), false);
+});
+
 JSON.stringify(results);
 `;
 

@@ -34,6 +34,7 @@ const DEFAULT_STATE = {
   taskOverworkAllowances: {}, // 'taskId|deadline|dateStr' → extra hours for that task occurrence only
   view: 'week',
   weekOffset: 0,
+  dayOffset: 0,
   projects: [],
   hiddenProjectIds: [],
   tasks: [],
@@ -43,6 +44,7 @@ const DEFAULT_STATE = {
   nudgeDismissed: false,
   taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
   lastCheckinDate: null,
+  cloud: { endpoint: '', token: '', lastSyncAt: null, lastError: '' },
   manualOverrides: {}, // occurrenceId → { pinned: {dateStr: hours}, excludedDates: [] }
 };
 
@@ -69,6 +71,11 @@ function finiteNumber(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function isCalicoStateDocument(candidate) {
+  return !!(candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+    && Array.isArray(candidate.tasks) && Array.isArray(candidate.events));
 }
 
 function normalizeState(input) {
@@ -123,11 +130,17 @@ function normalizeState(input) {
   next.intensities = next.intensities && typeof next.intensities === 'object' ? next.intensities : {};
   next.intensityHistory = Array.isArray(next.intensityHistory) ? next.intensityHistory.slice(-30) : [];
   next.taskLog = next.taskLog && typeof next.taskLog === 'object' ? next.taskLog : {};
+  next.cloud = next.cloud && typeof next.cloud === 'object' ? next.cloud : {};
+  next.cloud.endpoint = String(next.cloud.endpoint || '').trim();
+  next.cloud.token = String(next.cloud.token || '');
+  next.cloud.lastSyncAt = next.cloud.lastSyncAt || null;
+  next.cloud.lastError = String(next.cloud.lastError || '');
   next.taskOverworkAllowances = next.taskOverworkAllowances && typeof next.taskOverworkAllowances === 'object'
     ? next.taskOverworkAllowances : {};
   next.manualOverrides = next.manualOverrides && typeof next.manualOverrides === 'object'
     ? next.manualOverrides : {};
-  if (!['week', 'agenda', 'settings'].includes(next.view)) next.view = 'week';
+  next.dayOffset = Math.trunc(finiteNumber(next.dayOffset, 0, -3650, 3650));
+  if (!['week', 'day', 'agenda', 'settings'].includes(next.view)) next.view = 'week';
   if (!['even', 'front', 'back', 'weighted'].includes(next.distribution)) next.distribution = 'even';
 
   // Migrate safe legacy pins for single-occurrence tasks. Repeating legacy
@@ -164,6 +177,7 @@ function save() {
   try {
     S.stateVersion = STATE_VERSION;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    queueCloudSave();
     return true;
   } catch (error) {
     console.error('Calico could not save state', error);
@@ -241,7 +255,7 @@ async function importDataFile(input) {
   try {
     const parsed = JSON.parse(await file.text());
     const candidate = parsed.state || parsed;
-    if (!candidate || !Array.isArray(candidate.tasks) || !Array.isArray(candidate.events)) {
+    if (!isCalicoStateDocument(candidate)) {
       throw new Error('This is not a Calico backup.');
     }
     if (!confirm('Replace the current Calico data with this backup?')) return;
@@ -255,6 +269,106 @@ async function importDataFile(input) {
     console.error('Calico import failed', error);
     showToast(error.message || 'That backup could not be imported');
   }
+}
+
+
+/* ══════════════════════════════════════════
+   OPTIONAL CLOUD PERSISTENCE
+══════════════════════════════════════════ */
+let _cloudSaveTimer = null;
+let _cloudSyncing = false;
+function cloudConfigured() {
+  return !!(S.cloud?.endpoint && /^https:\/\//i.test(S.cloud.endpoint));
+}
+function cloudHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (S.cloud?.token) headers.Authorization = `Bearer ${S.cloud.token}`;
+  return headers;
+}
+function queueCloudSave() {
+  if (!cloudConfigured() || typeof fetch !== 'function') return;
+  clearTimeout(_cloudSaveTimer);
+  _cloudSaveTimer = setTimeout(() => syncCloudNow(true), 600);
+}
+function stateForCloudSync() {
+  const state = normalizeState(S);
+  state.cloud = { ...state.cloud };
+  delete state.cloud.token;
+  return state;
+}
+async function syncCloudNow(silent = false) {
+  if (!cloudConfigured()) {
+    if (!silent) showToast('Add an HTTPS cloud endpoint first.');
+    return false;
+  }
+  if (_cloudSyncing || typeof fetch !== 'function') return false;
+  _cloudSyncing = true;
+  try {
+    const payload = { state: stateForCloudSync(), updatedAt: new Date().toISOString() };
+    const response = await fetch(S.cloud.endpoint, { method: 'PUT', headers: cloudHeaders(), body: JSON.stringify(payload) });
+    if (!response.ok) throw new Error(`Cloud save failed (${response.status})`);
+    S.cloud.lastSyncAt = new Date().toISOString();
+    S.cloud.lastError = '';
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    if (!silent) showToast('Cloud sync complete');
+    renderSettingsCloudStatus();
+    return true;
+  } catch (error) {
+    S.cloud.lastError = error.message || 'Cloud save failed';
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    if (!silent) showToast(S.cloud.lastError);
+    renderSettingsCloudStatus();
+    return false;
+  } finally {
+    _cloudSyncing = false;
+  }
+}
+async function loadCloudState() {
+  if (!cloudConfigured() || typeof fetch !== 'function') return false;
+  try {
+    const response = await fetch(S.cloud.endpoint, { method: 'GET', headers: cloudHeaders() });
+    if (response.status === 404) return syncCloudNow(true);
+    if (!response.ok) throw new Error(`Cloud load failed (${response.status})`);
+    const parsed = await response.json();
+    const candidate = parsed.state || parsed;
+    if (!isCalicoStateDocument(candidate)) {
+      throw new Error('This is not a Calico backup.');
+    }
+    const remote = normalizeState(candidate);
+    const localCloud = { ...S.cloud };
+    const replace = confirm('Cloud data is available. Replace this device with the cloud copy? Choose Cancel to keep local data and upload it.');
+    if (replace) S = remote;
+    S.cloud = { ...S.cloud, endpoint: localCloud.endpoint, token: localCloud.token, lastSyncAt: new Date().toISOString(), lastError: '' };
+    invalidatePlan();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    render();
+    if (!replace) await syncCloudNow(true);
+    return true;
+  } catch (error) {
+    S.cloud.lastError = error.message || 'Cloud load failed';
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+    showToast(S.cloud.lastError + ' — local recovery copy kept.');
+    return false;
+  }
+}
+function saveCloudSettings() {
+  S.cloud ||= {};
+  S.cloud.endpoint = document.getElementById('settings-cloud-endpoint')?.value.trim() || '';
+  S.cloud.token = document.getElementById('settings-cloud-token')?.value || '';
+  S.cloud.lastError = '';
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
+  renderSettingsCloudStatus();
+  loadCloudState();
+}
+function renderSettingsCloudStatus() {
+  const endpoint = document.getElementById('settings-cloud-endpoint');
+  const token = document.getElementById('settings-cloud-token');
+  const status = document.getElementById('settings-cloud-status');
+  if (endpoint) endpoint.value = S.cloud?.endpoint || '';
+  if (token) token.value = S.cloud?.token || '';
+  if (status) status.textContent = S.cloud?.lastError
+    ? `Cloud warning: ${S.cloud.lastError}`
+    : S.cloud?.lastSyncAt ? `Last cloud sync: ${new Date(S.cloud.lastSyncAt).toLocaleString()}` : 'Local-only until a cloud endpoint is configured.';
 }
 
 /* ══════════════════════════════════════════
@@ -906,7 +1020,11 @@ function allocateOccurrenceBatchConvergent(batch, remainingCapacity) {
   const constrained = available + ALLOC_EPSILON < totalNeeded;
 
   if (batch.some(occ => occ.splittable === false)) {
-    batch.forEach(occ => {
+    const conservativeOrder = batch.slice().sort((a, b) => {
+      if (a.splittable !== b.splittable) return a.splittable === false ? -1 : 1;
+      return occurrenceUrgency(b) - occurrenceUrgency(a) || (a.occId < b.occId ? -1 : 1);
+    });
+    conservativeOrder.forEach(occ => {
       const result = allocateOccurrenceConvergent(occ, remainingCapacity);
       results[occ.occId] = {
         allocation: result.allocation,
@@ -1360,6 +1478,7 @@ function render() {
   renderProjectFilters();
   renderSidebar();
   if (S.view==='week')        renderWeek();
+  else if (S.view==='day')      renderDay();
   else if (S.view==='agenda')   renderAgenda();
   else if (S.view==='settings') renderSettings();
   syncNavButtons();
@@ -1417,19 +1536,27 @@ function showAllProjects() {
 }
 
 function updateWeekLabel() {
+  const label = document.getElementById('week-label');
+  if (!label) return;
+  if (S.view === 'day') {
+    const d = addDays(today(), S.dayOffset || 0);
+    label.textContent = d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
+    return;
+  }
   const ws = weekStartDate(S.weekOffset);
   const we = addDays(ws, 6);
-  document.getElementById('week-label').textContent = `${fmt(ws)} – ${fmt(we)}`;
+  label.textContent = `${fmt(ws)} – ${fmt(we)}`;
 }
 
 function syncNavButtons() {
-  ['week','agenda','settings'].forEach(v => {
+  ['week','day','agenda','settings'].forEach(v => {
     document.getElementById(`nav-${v}`)?.classList.toggle('active', S.view===v);
     document.getElementById(`mb-${v}`)?.classList.toggle('active', S.view===v);
   });
   document.getElementById('sw-week')?.classList.toggle('active', S.view==='week');
+  document.getElementById('sw-day')?.classList.toggle('active', S.view==='day');
   document.getElementById('sw-agenda')?.classList.toggle('active', S.view==='agenda');
-  ['view-week','view-agenda','view-settings'].forEach(id => {
+  ['view-week','view-day','view-agenda','view-settings'].forEach(id => {
     document.getElementById(id).classList.toggle('hidden', !id.endsWith(S.view));
   });
   // topbar nav arrows / toggle only relevant for week+agenda
@@ -1735,6 +1862,82 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     block.onclick = () => openModal('event', item.id);
   }
   return block;
+}
+
+
+function dayScheduleItems(dateStr) {
+  const events = eventsOnDay(dateStr).map(ev => ({
+    kind: 'event', id: ev.id, item: ev, start: timeH(ev.start || S.dayStart), label: `${ev.start || ''}–${ev.end || ''}`,
+  }));
+  const tasks = tasksOnDay(dateStr)
+    .filter(isTaskVisible)
+    .map(task => ({ kind: 'task', id: task.id, item: task, start: timeH(S.dayStart || '09:00'), hours: taskHoursOnDay(task, dateStr), label: `${taskHoursOnDay(task, dateStr)}h planned` }));
+  return [...events, ...tasks].sort((a, b) => (a.start - b.start) || (a.kind === 'event' ? -1 : 1));
+}
+
+function renderDay() {
+  const date = addDays(today(), S.dayOffset || 0);
+  const dateStr = ds(date);
+  const plan = allocateSchedule();
+  const body = document.getElementById('day-body');
+  if (!body) return;
+  const used = roundHours(plan.dailyUsed[dateStr] || 0);
+  const free = roundHours(plan.dailyFree[dateStr] || 0);
+  const remaining = roundHours(Math.max(0, free - used));
+  const items = dayScheduleItems(dateStr);
+  body.innerHTML = `
+    <div class="day-shell">
+      <div class="day-hero">
+        <div>
+          <div class="day-eyebrow">Day view</div>
+          <h2>${escapeHtml(date.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }))}</h2>
+        </div>
+        <div class="day-nav-actions">
+          <button class="btn-ghost" onclick="shiftWeek(-1)">← Previous</button>
+          <button class="btn-ghost" onclick="goToday()">Today</button>
+          <button class="btn-ghost" onclick="shiftWeek(1)">Next →</button>
+        </div>
+      </div>
+      <div class="day-stats">
+        <div><strong>${used}h</strong><span>planned task hours</span></div>
+        <div><strong>${free}h</strong><span>task capacity after events</span></div>
+        <div><strong>${remaining}h</strong><span>remaining capacity</span></div>
+      </div>
+      <div class="day-list" id="day-list"></div>
+    </div>`;
+  const list = document.getElementById('day-list');
+  if (!items.length) {
+    list.innerHTML = '<div class="day-empty">Nothing scheduled for this day.</div>';
+    return;
+  }
+  items.forEach(entry => {
+    const row = document.createElement('div');
+    const color = safeColor(entry.item.color, '#9b9b9b');
+    row.className = `day-item ${entry.kind}`;
+    row.style.setProperty('--item-color', color);
+    if (entry.kind === 'event') {
+      const rl = repeatLabel(entry.item);
+      row.innerHTML = `<div class="day-time">${escapeHtml(entry.label)}</div><div class="day-card"><div class="day-kind">Fixed event${rl ? ' · ' + escapeHtml(rl) : ''}</div><div class="day-title">${escapeHtml(entry.item.name)}</div></div>`;
+      row.onclick = () => openModal('event', entry.item.id);
+    } else {
+      const completion = taskCompletionState(entry.item, dateStr);
+      const fixed = hasManualOverrideForTaskDate(entry.item.id, dateStr);
+      row.classList.toggle('completed', completion.done);
+      row.innerHTML = `<div class="day-time">${roundHours(entry.hours)}h</div><div class="day-card"><div class="day-kind">Calico work block · ${fixed ? 'fixed by you' : 'flexible'}</div><div class="day-title">${escapeHtml(entry.item.name)}</div><div class="day-actions"><button type="button" data-action="done">${completion.done ? 'Mark not done' : 'Done'}</button><button type="button" data-action="partial">Partial</button><button type="button" data-action="adjust">Adjust</button>${fixed ? '<button type="button" data-action="auto">Auto</button>' : ''}</div></div>`;
+      row.querySelector('[data-action="done"]').onclick = e => { e.stopPropagation(); toggleTaskLog(entry.item, dateStr, entry.hours); };
+      row.querySelector('[data-action="partial"]').onclick = e => { e.stopPropagation(); promptTaskPartial(entry.item, dateStr, entry.hours); };
+      row.querySelector('[data-action="adjust"]').onclick = e => { e.stopPropagation(); openDayHoursEditor(entry.item.id, dateStr); };
+      row.querySelector('[data-action="auto"]')?.addEventListener('click', e => { e.stopPropagation(); returnTaskDayToAuto(entry.item.id, dateStr); });
+      row.onclick = () => openModal('task', entry.item.id);
+    }
+    list.appendChild(row);
+  });
+}
+
+function promptTaskPartial(task, dateStr, scheduledHrs = taskHoursOnDay(task, dateStr)) {
+  const raw = prompt(`How many of ${roundHours(scheduledHrs)}h did you complete?`, String(roundHours(scheduledHrs / 2)));
+  if (raw === null) return;
+  recordTaskCheckin(task, dateStr, scheduledHrs, parseFloat(raw));
 }
 
 /* ── Agenda view ── */
@@ -2582,6 +2785,7 @@ function renderSettings() {
   const minBlock = document.getElementById('settings-min-block');
   if (minBlock) minBlock.value = S.minBlockHours || 0.5;
   renderProjectSettings();
+  renderSettingsCloudStatus();
 }
 
 function renderProjectSettings() {
@@ -2746,7 +2950,28 @@ function onTypeChange() {
   const type = document.getElementById('f-type').value;
   document.getElementById('task-fields').classList.toggle('hidden', type !== 'task');
   document.getElementById('event-fields').classList.toggle('hidden', type !== 'event');
-  document.getElementById('task-project-field')?.classList.toggle('hidden', type !== 'task');
+  syncAdvancedTaskFields();
+}
+
+function syncAdvancedTaskFields(forceOpen) {
+  const type = document.getElementById('f-type')?.value || 'task';
+  const open = type === 'event' || forceOpen || document.getElementById('advanced-task-toggle')?.dataset.open === 'true';
+  document.querySelectorAll('.advanced-task-field').forEach(el => {
+    el.classList.toggle('hidden', type === 'task' && !open);
+    el.classList.toggle('hidden', type !== 'task' && el.id === 'task-project-field');
+  });
+  const toggle = document.getElementById('advanced-task-toggle');
+  if (toggle) {
+    toggle.classList.toggle('hidden', type !== 'task');
+    toggle.dataset.open = open ? 'true' : 'false';
+    toggle.textContent = open ? 'Hide advanced options' : 'Advanced options';
+  }
+}
+
+function toggleAdvancedTaskFields() {
+  const toggle = document.getElementById('advanced-task-toggle');
+  if (!toggle) return;
+  syncAdvancedTaskFields(toggle.dataset.open !== 'true');
 }
 
 function populateProjectSelect(selectedId = '') {
@@ -2812,6 +3037,8 @@ function openModal(type, id) {
   pickedColor = '#111111';
 
   document.getElementById('modal-title-text').textContent = id ? `Edit ${type}` : `Add ${type}`;
+  const advToggle = document.getElementById('advanced-task-toggle');
+  if (advToggle) advToggle.dataset.open = id ? 'true' : 'false';
   document.getElementById('modal-del').classList.toggle('hidden', !id);
   document.getElementById('f-type').value = type;
   populateProjectSelect();
@@ -2831,6 +3058,7 @@ function openModal(type, id) {
       document.getElementById('f-priority').value = item.priority || 'mandatory';
       onTypeChange();
       if ((item.type||type) === 'task') {
+        syncAdvancedTaskFields(true);
         populateProjectSelect(item.projectId || '');
         document.getElementById('f-deadline').value     = item.deadline || todayVal;
         document.getElementById('f-task-start-date').value = item.date || item.deadline || todayVal;
@@ -2895,6 +3123,7 @@ function openModal(type, id) {
     populateProjectSelect();
     onRepeatChange();
     onTaskRepeatChange();
+    syncAdvancedTaskFields(false);
     document.querySelectorAll('input[name="rday"]').forEach(cb => { cb.checked = false; });
     document.querySelectorAll('input[name="trday"]').forEach(cb => { cb.checked = false; });
   }
@@ -3087,12 +3316,87 @@ document.addEventListener('click', function(e) {
   if (e.target.id === 'day-hours-bg') closeDayHoursEditor();
 });
 
+
+/* ══════════════════════════════════════════
+   SEARCH + KEYBOARD SHORTCUTS
+══════════════════════════════════════════ */
+function searchMatches(query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  const hits = [];
+  S.tasks.forEach(task => {
+    const project = projectForTask(task);
+    const hay = [task.name, task.deadline, task.priority, project?.name].filter(Boolean).join(' ').toLowerCase();
+    if (hay.includes(q)) hits.push({ type: 'task', id: task.id, label: task.name, meta: project?.name || task.deadline || 'Task' });
+  });
+  S.events.forEach(ev => {
+    const hay = [ev.name, ev.date, ev.start, ev.end, repeatLabel(ev)].filter(Boolean).join(' ').toLowerCase();
+    if (hay.includes(q)) hits.push({ type: 'event', id: ev.id, label: ev.name, meta: ev.date || 'Event' });
+  });
+  S.projects.forEach(project => {
+    const hay = [project.name].join(' ').toLowerCase();
+    if (hay.includes(q)) hits.push({ type: 'project', id: project.id, label: project.name, meta: `${S.tasks.filter(t => t.projectId === project.id).length} tasks` });
+  });
+  return hits.slice(0, 8);
+}
+
+function renderSearchResults() {
+  const input = document.getElementById('global-search');
+  const box = document.getElementById('search-results');
+  if (!input || !box) return;
+  const hits = searchMatches(input.value);
+  box.classList.toggle('hidden', !input.value.trim());
+  box.innerHTML = hits.length ? '' : '<div class="search-empty">No matches</div>';
+  hits.forEach(hit => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'search-hit';
+    row.innerHTML = `<strong>${escapeHtml(hit.label)}</strong><span>${escapeHtml(hit.type)} · ${escapeHtml(hit.meta)}</span>`;
+    row.onclick = () => openSearchHit(hit);
+    box.appendChild(row);
+  });
+}
+
+function openSearchHit(hit) {
+  const input = document.getElementById('global-search');
+  const box = document.getElementById('search-results');
+  if (input) input.value = '';
+  box?.classList.add('hidden');
+  if (hit.type === 'task') openModal('task', hit.id);
+  else if (hit.type === 'event') openModal('event', hit.id);
+  else if (hit.type === 'project') { setView('settings'); setTimeout(() => document.getElementById('settings-project-list')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0); }
+}
+
+function isTypingTarget(target) {
+  return ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName) || target?.isContentEditable;
+}
+
+document.addEventListener('keydown', event => {
+  if (isTypingTarget(event.target)) return;
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+    event.preventDefault(); undoLastAction(); return;
+  }
+  if (event.key === 'Escape') {
+    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor();
+    document.getElementById('checkin-bg')?.classList.add('hidden');
+    document.getElementById('search-results')?.classList.add('hidden');
+    return;
+  }
+  if (event.key.toLowerCase() === 'n') { event.preventDefault(); openModal('task'); }
+  if (event.key.toLowerCase() === 'e') { event.preventDefault(); openModal('event'); }
+  if (event.key.toLowerCase() === 't') { event.preventDefault(); goToday(); setView('day'); }
+});
+
 /* ══════════════════════════════════════════
    NAVIGATION
 ══════════════════════════════════════════ */
 function setView(v) { S.view = v; save(); render(); }
-function shiftWeek(d) { S.weekOffset += d; save(); render(); }
-function goToday() { S.weekOffset = 0; save(); render(); }
+function shiftWeek(d) {
+  if (S.view === 'day') S.dayOffset = (S.dayOffset || 0) + d;
+  else S.weekOffset += d;
+  save(); render();
+}
+function goToday() { S.weekOffset = 0; S.dayOffset = 0; save(); render(); }
 
 /* ══════════════════════════════════════════
    NUDGE
@@ -3688,6 +3992,11 @@ function maybeShowCheckin() {
         <div class="ci-accent" style="background:${safeColor(task.color)}"></div>
         <div class="ci-name">${escapeHtml(task.name)}</div>
         <div class="ci-scheduled">${hrs}h scheduled</div>
+        <div class="ci-choice-row">
+          <button type="button" onclick="setCheckinChoice(this, 'done')">Done</button>
+          <button type="button" onclick="setCheckinChoice(this, 'partial')">Partly</button>
+          <button type="button" onclick="setCheckinChoice(this, 'skipped')">Skipped</button>
+        </div>
         <label class="ci-completed"><span>Completed</span><input type="number" min="0" max="${hrs}" step="0.25" value="${completed}" oninput="updateCheckinCompletion(this)"><span>h</span></label>
       </div>`;
 
@@ -3722,6 +4031,20 @@ function updateCheckinCompletion(input) {
   setCheckinRowCompletion(row, input.value);
 }
 
+function setCheckinChoice(button, choice) {
+  const row = button.closest('.checkin-task-item');
+  if (!row) return;
+  const hrs = parseFloat(row.dataset.scheduled) || 0;
+  if (choice === 'done') setCheckinRowCompletion(row, hrs);
+  else if (choice === 'skipped') setCheckinRowCompletion(row, 0);
+  else {
+    const current = parseFloat(row.dataset.completed) || Math.min(hrs, Math.max(0.25, hrs / 2));
+    setCheckinRowCompletion(row, current >= hrs ? Math.max(0, hrs / 2) : current);
+    row.querySelector('.ci-completed input')?.focus();
+    row.querySelector('.ci-completed input')?.select();
+  }
+}
+
 function toggleCheckinItem(checkEl) {
   const row   = checkEl.closest('.checkin-task-item');
   const hrs   = parseFloat(row.dataset.scheduled);
@@ -3746,7 +4069,7 @@ function submitCheckin() {
   invalidatePlan();
   document.getElementById('checkin-bg').classList.add('hidden');
   save(); render();
-  showToast('Check-in saved');
+  showToast('Check-in saved — unfinished work was returned to the schedule.');
 }
 
 function dismissCheckin() {
@@ -3775,6 +4098,7 @@ if (S.onboarded) {
   if (S.lastCheckinDate !== todayStr) {
     maybeShowCheckin();
   }
+  loadCloudState();
 } else {
   document.getElementById('onboarding').classList.remove('hidden');
   document.getElementById('app').classList.add('hidden');

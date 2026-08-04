@@ -16,13 +16,13 @@
   <div class="ob-card">
     <div class="ob-step" id="ob-1">
       <div class="ob-logo">CALICO</div>
-      <p class="ob-tagline">Scheduling that bends<br>to how you feel.</p>
+      <p class="ob-tagline">Realistic plans for<br>sustainable work.</p>
       <button class="btn-primary" onclick="obNext(1)">Get started →</button>
     </div>
     <div class="ob-step hidden" id="ob-2">
       <div class="ob-step-num">01 / 02</div>
       <h2 class="ob-heading">WORKING INTENSITY</h2>
-      <p class="ob-body">On a normal day, how hard do you push? This sets your baseline so Calico knows how many hours to schedule by default.</p>
+      <p class="ob-body">Set a realistic baseline for focused productive hours on a typical sustainable day. Free calendar time is not the same as capacity, and you can adjust individual days later.</p>
       <div class="int-widget">
         <div class="int-big" id="ob-num">7</div>
         <div class="int-track-wrap">
@@ -55,6 +55,7 @@
       <div class="wordmark">CALICO</div>
       <nav class="sidebar-nav">
         <button class="nav-btn active" id="nav-week"     onclick="setView('week')">    <span class="nav-ico">⊞</span> Week</button>
+        <button class="nav-btn"        id="nav-day"      onclick="setView('day')">     <span class="nav-ico">◷</span> Today</button>
         <button class="nav-btn"        id="nav-agenda"   onclick="setView('agenda')">  <span class="nav-ico">≡</span> Agenda</button>
         <button class="nav-btn"        id="nav-settings" onclick="setView('settings')"><span class="nav-ico">⚙</span> Settings</button>
       </nav>
@@ -88,11 +89,13 @@
         <span class="week-label" id="week-label"></span>
         <button class="icon-btn" onclick="shiftWeek(1)">→</button>
         <button class="pill-btn" onclick="goToday()">Today</button>
+        <div class="quick-search"><input id="global-search" type="search" placeholder="Search" autocomplete="off" oninput="renderSearchResults()"><div id="search-results" class="search-results hidden"></div></div>
       </div>
       <div class="topbar-right">
         <button class="icon-btn" id="undo-btn" onclick="undoLastAction()" title="Nothing to undo" disabled>↶</button>
         <div class="view-switch">
           <button id="sw-week"   class="sw-btn active" onclick="setView('week')">Week</button>
+          <button id="sw-day"    class="sw-btn"        onclick="setView('day')">Day</button>
           <button id="sw-agenda" class="sw-btn"        onclick="setView('agenda')">Agenda</button>
         </div>
       </div>
@@ -105,6 +108,10 @@
       <div class="wk-body" id="wk-body"></div>
     </div>
 
+    <div id="view-day" class="view-panel hidden">
+      <div id="day-body" class="day-body"></div>
+    </div>
+
     <div id="view-agenda" class="view-panel hidden">
       <div id="agenda-body" class="agenda-body"></div>
     </div>
@@ -114,7 +121,7 @@
         <div class="settings-grid">
         <div class="settings-card">
           <h2 class="settings-heading">BASELINE INTENSITY</h2>
-          <p class="settings-sub">How hard you work on a normal day. Calico uses this to allocate hours by default.</p>
+          <p class="settings-sub">Your typical sustainable productive capacity. Calico schedules against this instead of assuming every free calendar hour is usable.</p>
           <div class="int-widget">
             <div class="int-big" id="settings-baseline-num">7</div>
             <div class="int-track-wrap">
@@ -156,6 +163,19 @@
           <button class="btn-danger" onclick="resetData()">Clear all data</button>
         </div>
         <div class="settings-card">
+          <h2 class="settings-heading">ACCOUNT &amp; CLOUD SYNC</h2>
+          <p class="settings-sub">Optional v0.1 cloud persistence. Configure a small HTTPS state API that stores one JSON state document per user.</p>
+          <div class="field-row">
+            <div class="field-group"><label>API endpoint</label><input type="url" id="settings-cloud-endpoint" placeholder="https://api.example.com/calico"></div>
+            <div class="field-group"><label>Access token</label><input type="password" id="settings-cloud-token" placeholder="Paste account token"></div>
+          </div>
+          <div class="settings-actions">
+            <button class="btn-primary" onclick="saveCloudSettings()">Save cloud settings</button>
+            <button class="btn-ghost" onclick="syncCloudNow()">Sync now</button>
+          </div>
+          <p class="settings-sub" id="settings-cloud-status" style="font-size:12px"></p>
+        </div>
+        <div class="settings-card">
           <h2 class="settings-heading">BACKUP &amp; RESTORE</h2>
           <p class="settings-sub">Export a portable copy of your Calico data, or restore a previous backup.</p>
           <div class="settings-actions">
@@ -180,6 +200,7 @@
   </main>
   <nav class="mobile-nav" aria-label="Primary">
     <button id="mb-week" class="mobile-nav-btn active" onclick="setView('week')"><span>⊞</span>Week</button>
+    <button id="mb-day" class="mobile-nav-btn" onclick="setView('day')"><span>◷</span>Today</button>
     <button id="mb-agenda" class="mobile-nav-btn" onclick="setView('agenda')"><span>≡</span>Agenda</button>
     <button class="mobile-nav-btn mobile-nav-add" onclick="openModal('task')" title="Add task or event"><span>+</span>Add</button>
     <button class="mobile-nav-btn" onclick="openReviewPanel()"><span>!</span>Review</button>
@@ -201,10 +222,11 @@
       </div>
       <div class="field-row">
         <div class="field-group"><label>Type</label><select id="f-type" onchange="onTypeChange()"><option value="task">Task</option><option value="event">Event</option></select></div>
-        <div class="field-group"><label>Priority</label><select id="f-priority"><option value="mandatory">Mandatory</option><option value="optional">Optional</option><option value="deferred">Deferred</option></select></div>
+        <div class="field-group advanced-task-field"><label>Priority</label><select id="f-priority"><option value="mandatory">Mandatory</option><option value="optional">Optional</option><option value="deferred">Deferred</option></select></div>
       </div>
       <div id="task-fields">
-        <div class="field-group" id="task-project-field">
+        <button type="button" id="advanced-task-toggle" class="advanced-toggle" onclick="toggleAdvancedTaskFields()">Advanced options</button>
+        <div class="field-group advanced-task-field" id="task-project-field">
           <label>Project <span style="font-style:italic;opacity:0.6">(optional)</span></label>
           <select id="f-project"><option value="">No project</option></select>
         </div>
@@ -212,13 +234,13 @@
           <div class="field-group"><label id="task-deadline-label">Deadline</label><input type="date" id="f-deadline"></div>
           <div class="field-group"><label>Hours per occurrence</label><input type="number" id="f-hours" min="0.5" step="0.5" value="4"></div>
         </div>
-        <div class="field-group"><label>Distribution</label><select id="f-dist"><option value="inherit">Use my default</option><option value="even">Even spread</option><option value="front">Front-loaded</option><option value="back">Back-loaded</option><option value="weighted">By free time</option></select></div>
-        <div class="field-row">
+        <div class="field-group advanced-task-field"><label>Distribution</label><select id="f-dist"><option value="inherit">Use my default</option><option value="even">Even spread</option><option value="front">Front-loaded</option><option value="back">Back-loaded</option><option value="weighted">By free time</option></select></div>
+        <div class="field-row advanced-task-field">
           <div class="field-group"><label>Minimum block</label><input type="number" id="f-min-block" min="0.25" step="0.25" value="0.5"></div>
           <label class="field-group check-field"><span>Can split across days</span><input type="checkbox" id="f-splittable" checked></label>
         </div>
-        <div class="field-group"><label>Don't schedule before <span style="font-style:italic;opacity:0.6">(optional)</span></label><input type="date" id="f-not-before" placeholder="Leave blank to start scheduling immediately"></div>
-        <div class="field-group">
+        <div class="field-group advanced-task-field"><label>Don't schedule before <span style="font-style:italic;opacity:0.6">(optional)</span></label><input type="date" id="f-not-before" placeholder="Leave blank to start scheduling immediately"></div>
+        <div class="field-group advanced-task-field">
           <label>Repeat</label>
           <select id="f-task-repeat" onchange="onTaskRepeatChange()">
             <option value="none">Does not repeat</option>

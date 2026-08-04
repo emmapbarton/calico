@@ -2,6 +2,11 @@
   "name": "calico",
   "private": true,
   "scripts": {
-    "test": "node tests/alpha-smoke.mjs"
+    "test": "node tests/alpha-smoke.mjs",
+    "check:syntax": "node --check app.js && node --check tests/alpha-smoke.mjs && node --check tests/serve-static.mjs && node --check playwright.config.js && node --check tests/e2e/calico.spec.js",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.46.0"
   }
 }

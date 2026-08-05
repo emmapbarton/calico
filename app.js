@@ -3981,7 +3981,7 @@ function maybeShowCheckin() {
   container.innerHTML = '';
 
   unchecked.forEach(({ task, hrs, key, entry }) => {
-    const completed = entry?.checked ? hrs : 0;
+    const completed = roundHours(Math.max(0, Math.min(hrs, entry?.completed ?? (entry?.checked ? hrs : 0))));
 
     const item = document.createElement('div');
     item.className = 'checkin-task-item';

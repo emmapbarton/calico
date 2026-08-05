@@ -8,8 +8,20 @@ async function onboard(page) {
   await expect(page.locator('#app')).toBeVisible();
 }
 
+async function openAddModal(page, type = 'task') {
+  const mobileAdd = page.locator('.mobile-nav-add');
+  if (await mobileAdd.isVisible()) {
+    await mobileAdd.click();
+    await page.locator('#f-type').selectOption(type);
+  } else if (type === 'event') {
+    await page.getByRole('button', { name: /add event/i }).click();
+  } else {
+    await page.getByRole('button', { name: /add task/i }).first().click();
+  }
+}
+
 async function addTask(page, name = 'E2E launch plan', hours = '4') {
-  await page.getByRole('button', { name: /add task/i }).first().click();
+  await openAddModal(page, 'task');
   await page.locator('#f-name').fill(name);
   await page.locator('#f-hours').fill(hours);
   await page.locator('#f-deadline').fill(new Date().toISOString().slice(0, 10));
@@ -29,7 +41,7 @@ test('onboarding, task creation, schedule, persistence and mobile smoke', async 
 test('event lifecycle, backup/reset/restore, search and manual task adjustment', async ({ page }) => {
   await onboard(page);
   await addTask(page, 'Adjustable task', '3');
-  await page.getByRole('button', { name: /add event/i }).click();
+  await openAddModal(page, 'event');
   await page.locator('#f-name').fill('Design review');
   await page.locator('#f-type').selectOption('event');
   await page.locator('#f-date').fill(new Date().toISOString().slice(0, 10));
@@ -44,7 +56,7 @@ test('event lifecycle, backup/reset/restore, search and manual task adjustment',
   await page.locator('#global-search').fill('Adjustable');
   await expect(page.locator('.search-hit').first()).toBeVisible();
   await page.getByRole('button', { name: /agenda/i }).first().click();
-  await page.getByText('Adjust').first().click();
+  await page.locator('.ag-task-row', { hasText: 'Adjustable task' }).getByRole('button', { name: /^adjust$/i }).click();
   await page.locator('#day-hours-input').fill('1');
   await page.getByRole('button', { name: /save adjustment/i }).click();
   await expect(page.getByText(/automatic again|fixed|adjusting|redistributed/i).first()).toBeVisible();
@@ -56,7 +68,7 @@ test('event lifecycle, backup/reset/restore, search and manual task adjustment',
 
 test('recurring event, conflict resolution and partial check-in UI', async ({ page }) => {
   await onboard(page);
-  await page.getByRole('button', { name: /add event/i }).click();
+  await openAddModal(page, 'event');
   await page.locator('#f-name').fill('Daily standup');
   await page.locator('#f-type').selectOption('event');
   await page.locator('#f-repeat').selectOption('daily');
@@ -69,6 +81,7 @@ test('recurring event, conflict resolution and partial check-in UI', async ({ pa
     const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
     const d = `${yesterday.getFullYear()}-${String(yesterday.getMonth()+1).padStart(2,'0')}-${String(yesterday.getDate()).padStart(2,'0')}`;
     S.tasks.push({ id: 'partial-ui', type: 'task', name: 'Partial UI task', priority: 'mandatory', deadline: d, date: d, hours: 2, dist: 'even', repeat: 'none', logged: 0, color: '#111111' });
+    S.taskLog['partial-ui|' + d] = { scheduled: 2, completed: 0, checked: false };
     invalidatePlan(); render(); maybeShowCheckin();
   });
   await expect(page.locator('#checkin-bg')).toBeVisible();

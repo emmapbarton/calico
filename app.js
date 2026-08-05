@@ -3957,12 +3957,14 @@ function maybeShowCheckin() {
   const unchecked = [];
 
   S.tasks.forEach(t => {
-    const hrs = taskHoursOnDay(t, yesterday);
-
-    if (hrs <= 0) return;
     const key = t.id + '|' + yesterday;
     const entry = S.taskLog[key];
-    if (!entry || !entry.checked) {
+    const scheduled = entry?.scheduled ?? taskHoursOnDay(t, yesterday);
+    const completed = entry?.completed ?? 0;
+    const hrs = roundHours(Math.max(0, scheduled));
+
+    if (hrs <= 0) return;
+    if (!entry || (!entry.checked && completed < hrs - ALLOC_EPSILON)) {
       unchecked.push({ task: t, hrs, key, entry });
     }
   });

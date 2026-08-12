@@ -1,5 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
+const chromiumChannel = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || undefined;
+
 export default defineConfig({
   testDir: './tests/e2e',
   timeout: 30000,
@@ -13,7 +15,7 @@ export default defineConfig({
     reuseExistingServer: !process.env.CI,
   },
   projects: [
-    { name: 'chromium', use: { browserName: 'chromium', viewport: { width: 1280, height: 900 } } },
-    { name: 'mobile', use: { browserName: 'chromium', viewport: { width: 390, height: 844 }, isMobile: true } },
+    { name: 'chromium', use: { browserName: 'chromium', channel: chromiumChannel, viewport: { width: 1280, height: 900 } } },
+    { name: 'mobile', use: { browserName: 'chromium', channel: chromiumChannel, viewport: { width: 390, height: 844 }, isMobile: true } },
   ],
 });

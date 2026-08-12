@@ -1094,7 +1094,27 @@ const context = {
 };
 
 const results = JSON.parse(vm.runInNewContext(appCode + suite, context, { timeout: 10000 }));
-fs.writeFileSync(new URL('./alpha-results.json', import.meta.url), JSON.stringify({ generatedAt: new Date().toISOString(), total: results.length, passed: results.filter(r => r.status === 'PASS').length, failed: results.filter(r => r.status !== 'PASS').length, results }, null, 2));
+const resultsUrl = new URL('./alpha-results.json', import.meta.url);
+const summary = {
+  total: results.length,
+  passed: results.filter(r => r.status === 'PASS').length,
+  failed: results.filter(r => r.status !== 'PASS').length,
+  results,
+};
+let previous;
+try {
+  previous = JSON.parse(fs.readFileSync(resultsUrl, 'utf8'));
+} catch {}
+const previousSummary = previous && {
+  total: previous.total,
+  passed: previous.passed,
+  failed: previous.failed,
+  results: previous.results,
+};
+const generatedAt = JSON.stringify(previousSummary) === JSON.stringify(summary)
+  ? previous.generatedAt
+  : new Date().toISOString();
+fs.writeFileSync(resultsUrl, JSON.stringify({ generatedAt, ...summary }, null, 2));
 for (const result of results) {
   console.log(`${result.status} ${result.name}${result.error ? ': ' + result.error : ''}`);
 }

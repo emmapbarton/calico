@@ -67,7 +67,7 @@ test('event lifecycle, backup/reset/restore, search and manual task adjustment',
   await page.locator('#global-search').fill('Adjustable');
   await expect(page.locator('.search-hit').first()).toBeVisible();
   await page.getByRole('button', { name: /agenda/i }).first().click();
-  await page.locator('.ag-task-row', { hasText: 'Adjustable task' }).getByRole('button', { name: /^adjust$/i }).click();
+  await page.locator('.ag-task-row', { hasText: 'Adjustable task' }).first().getByRole('button', { name: /^adjust$/i }).click();
   await page.locator('#day-hours-input').fill('1');
   await page.getByRole('button', { name: /save adjustment/i }).click();
   await expect(page.locator('#day-hours-bg')).toBeHidden();

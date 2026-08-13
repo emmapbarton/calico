@@ -6,7 +6,7 @@
 <title>Calico</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -79,6 +79,8 @@
         <span class="baseline-num" id="sb-baseline">7</span>
         <span class="baseline-denom">/10</span>
       </div>
+      <div class="baseline-track"><span></span></div>
+      <div class="baseline-copy">steady focus capacity</div>
     </div>
   </aside>
 
@@ -92,12 +94,12 @@
         <div class="quick-search"><input id="global-search" type="search" placeholder="Search" autocomplete="off" oninput="renderSearchResults()"><div id="search-results" class="search-results hidden"></div></div>
       </div>
       <div class="topbar-right">
-        <button class="icon-btn" id="undo-btn" onclick="undoLastAction()" title="Nothing to undo" disabled>↶</button>
         <div class="view-switch">
-          <button id="sw-week"   class="sw-btn active" onclick="setView('week')">Week</button>
           <button id="sw-day"    class="sw-btn"        onclick="setView('day')">Day</button>
+          <button id="sw-week"   class="sw-btn active" onclick="setView('week')">Week</button>
           <button id="sw-agenda" class="sw-btn"        onclick="setView('agenda')">Agenda</button>
         </div>
+        <button class="icon-btn" id="undo-btn" onclick="undoLastAction()" title="Nothing to undo" disabled>↶</button>
       </div>
     </div>
     <div id="project-filter-bar" class="project-filter-bar hidden" aria-label="Project filters"></div>
@@ -199,8 +201,8 @@
     </div>
   </main>
   <nav class="mobile-nav" aria-label="Primary">
-    <button id="mb-week" class="mobile-nav-btn active" onclick="setView('week')"><span>⊞</span>Week</button>
     <button id="mb-day" class="mobile-nav-btn" onclick="setView('day')"><span>◷</span>Today</button>
+    <button id="mb-week" class="mobile-nav-btn active" onclick="setView('week')"><span>⊞</span>Week</button>
     <button id="mb-agenda" class="mobile-nav-btn" onclick="setView('agenda')"><span>≡</span>Agenda</button>
     <button class="mobile-nav-btn mobile-nav-add" onclick="openModal('task')" title="Add task or event"><span>+</span>Add</button>
     <button class="mobile-nav-btn" onclick="openReviewPanel()"><span>!</span>Review</button>

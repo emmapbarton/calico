@@ -54,10 +54,10 @@
     <div class="sidebar-top">
       <div class="wordmark">CALICO</div>
       <nav class="sidebar-nav">
-        <button class="nav-btn active" id="nav-week"     onclick="setView('week')">    <span class="nav-ico">⊞</span> Week</button>
-        <button class="nav-btn"        id="nav-day"      onclick="setView('day')">     <span class="nav-ico">◷</span> Today</button>
-        <button class="nav-btn"        id="nav-agenda"   onclick="setView('agenda')">  <span class="nav-ico">≡</span> Agenda</button>
-        <button class="nav-btn"        id="nav-settings" onclick="setView('settings')"><span class="nav-ico">⚙</span> Settings</button>
+        <button class="nav-btn"        id="nav-day"      onclick="setView('day')">Today <span class="nav-ico">◷</span></button>
+        <button class="nav-btn active" id="nav-week"     onclick="setView('week')">Week <span class="nav-ico">⊞</span></button>
+        <button class="nav-btn"        id="nav-agenda"   onclick="setView('agenda')">Agenda <span class="nav-ico">≡</span></button>
+        <button class="nav-btn"        id="nav-settings" onclick="setView('settings')">Settings <span class="nav-ico">⚙</span></button>
       </nav>
     </div>
     <div class="sidebar-mid">
@@ -87,11 +87,13 @@
   <main class="main">
     <div class="topbar">
       <div class="topbar-left">
+        <span class="mobile-brand">CALICO</span>
         <button class="icon-btn" onclick="shiftWeek(-1)">←</button>
         <span class="week-label" id="week-label"></span>
         <button class="icon-btn" onclick="shiftWeek(1)">→</button>
         <button class="pill-btn" onclick="goToday()">Today</button>
         <div class="quick-search"><input id="global-search" type="search" placeholder="Search" autocomplete="off" oninput="renderSearchResults()"><div id="search-results" class="search-results hidden"></div></div>
+        <button class="icon-btn mobile-add-btn" onclick="openModal('task')" title="Add task or event">+</button>
       </div>
       <div class="topbar-right">
         <div class="view-switch">
@@ -99,6 +101,7 @@
           <button id="sw-week"   class="sw-btn active" onclick="setView('week')">Week</button>
           <button id="sw-agenda" class="sw-btn"        onclick="setView('agenda')">Agenda</button>
         </div>
+        <button class="pill-btn topbar-add-btn" onclick="openModal('task')">Add task</button>
         <button class="icon-btn" id="undo-btn" onclick="undoLastAction()" title="Nothing to undo" disabled>↶</button>
       </div>
     </div>
@@ -201,12 +204,11 @@
     </div>
   </main>
   <nav class="mobile-nav" aria-label="Primary">
-    <button id="mb-day" class="mobile-nav-btn" onclick="setView('day')"><span>◷</span>Today</button>
-    <button id="mb-week" class="mobile-nav-btn active" onclick="setView('week')"><span>⊞</span>Week</button>
-    <button id="mb-agenda" class="mobile-nav-btn" onclick="setView('agenda')"><span>≡</span>Agenda</button>
+    <button id="mb-day" class="mobile-nav-btn" onclick="setView('day')">Day</button>
+    <button id="mb-week" class="mobile-nav-btn active" onclick="setView('week')">Week</button>
     <button class="mobile-nav-btn mobile-nav-add" onclick="openModal('task')" title="Add task or event"><span>+</span>Add</button>
     <button class="mobile-nav-btn" onclick="openReviewPanel()"><span>!</span>Review</button>
-    <button id="mb-settings" class="mobile-nav-btn" onclick="setView('settings')"><span>⚙</span>Settings</button>
+    <button id="mb-settings" class="mobile-nav-btn" onclick="setView('settings')">Settings</button>
   </nav>
 </div>
 

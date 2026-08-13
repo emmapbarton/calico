@@ -3314,6 +3314,7 @@ document.addEventListener('click', function(e) {
   if (e.target.id === 'conflict-bg') closeConflict();
   if (e.target.id === 'review-bg') closeReviewPanel();
   if (e.target.id === 'day-hours-bg') closeDayHoursEditor();
+  if (!e.target.closest('.quick-search')) closeSearchResults();
 });
 
 
@@ -3357,11 +3358,17 @@ function renderSearchResults() {
   });
 }
 
-function openSearchHit(hit) {
+function closeSearchResults({ clear = false } = {}) {
   const input = document.getElementById('global-search');
   const box = document.getElementById('search-results');
-  if (input) input.value = '';
+  if (clear && input) input.value = '';
   box?.classList.add('hidden');
+}
+
+function openSearchHit(hit) {
+  const input = document.getElementById('global-search');
+  if (input) input.value = '';
+  closeSearchResults();
   if (hit.type === 'task') openModal('task', hit.id);
   else if (hit.type === 'event') openModal('event', hit.id);
   else if (hit.type === 'project') { setView('settings'); setTimeout(() => document.getElementById('settings-project-list')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0); }
@@ -3372,15 +3379,14 @@ function isTypingTarget(target) {
 }
 
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor(); closeSearchResults();
+    document.getElementById('checkin-bg')?.classList.add('hidden');
+    return;
+  }
   if (isTypingTarget(event.target)) return;
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
     event.preventDefault(); undoLastAction(); return;
-  }
-  if (event.key === 'Escape') {
-    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor();
-    document.getElementById('checkin-bg')?.classList.add('hidden');
-    document.getElementById('search-results')?.classList.add('hidden');
-    return;
   }
   if (event.key.toLowerCase() === 'n') { event.preventDefault(); openModal('task'); }
   if (event.key.toLowerCase() === 'e') { event.preventDefault(); openModal('event'); }
@@ -3390,7 +3396,7 @@ document.addEventListener('keydown', event => {
 /* ══════════════════════════════════════════
    NAVIGATION
 ══════════════════════════════════════════ */
-function setView(v) { S.view = v; save(); render(); }
+function setView(v) { closeSearchResults(); S.view = v; save(); render(); }
 function shiftWeek(d) {
   if (S.view === 'day') S.dayOffset = (S.dayOffset || 0) + d;
   else S.weekOffset += d;

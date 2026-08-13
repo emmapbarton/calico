@@ -1594,8 +1594,8 @@ body {
   .project-filter-bar { padding: 6px 10px; min-height: 40px; }
   .topbar-left,
   .topbar-right { width: 100%; }
-  .topbar-left { gap: 5px; min-width: 0; justify-content: space-between; }
-  .topbar-right { justify-content: space-between; gap: 6px; }
+  .topbar-left { position: relative; z-index: 60; gap: 5px; min-width: 0; justify-content: space-between; }
+  .topbar-right { position: relative; z-index: 80; justify-content: space-between; gap: 6px; }
   .topbar-left .icon-btn { width: 28px; height: 28px; }
   .week-label {
     min-width: 0;

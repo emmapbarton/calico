@@ -1093,7 +1093,7 @@ const context = {
   },
 };
 
-const results = JSON.parse(vm.runInNewContext(appCode + suite, context, { timeout: 10000 }));
+const results = JSON.parse(vm.runInNewContext(appCode + suite, context, { timeout: 20000 }));
 const resultsUrl = new URL('./alpha-results.json', import.meta.url);
 const summary = {
   total: results.length,

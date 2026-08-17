@@ -226,74 +226,74 @@
       </div>
       <div class="field-row">
         <div class="field-group"><label>Type</label><select id="f-type" onchange="onTypeChange()"><option value="task">Task</option><option value="event">Event</option></select></div>
-        <div class="field-group advanced-task-field"><label>Priority</label><select id="f-priority"><option value="mandatory">Mandatory</option><option value="optional">Optional</option><option value="deferred">Deferred</option></select></div>
+        <div class="field-group"><label>Priority</label><select id="f-priority"><option value="mandatory">Mandatory</option><option value="optional">Optional</option></select></div>
       </div>
       <div id="task-fields">
-        <button type="button" id="advanced-task-toggle" class="advanced-toggle" onclick="toggleAdvancedTaskFields()">Advanced options</button>
-        <div class="field-group advanced-task-field" id="task-project-field">
-          <label>Project <span style="font-style:italic;opacity:0.6">(optional)</span></label>
-          <select id="f-project"><option value="">No project</option></select>
-        </div>
         <div class="field-row">
           <div class="field-group"><label id="task-deadline-label">Deadline</label><input type="date" id="f-deadline"></div>
-          <div class="field-group"><label>Hours per occurrence</label><input type="number" id="f-hours" min="0.5" step="0.5" value="4"></div>
+          <div class="field-group"><label>Expected hours</label><input type="number" id="f-hours" min="0.5" step="0.5" value="4"></div>
         </div>
-        <div class="field-group advanced-task-field"><label>Distribution</label><select id="f-dist"><option value="inherit">Use my default</option><option value="even">Even spread</option><option value="front">Front-loaded</option><option value="back">Back-loaded</option><option value="weighted">By free time</option></select></div>
-        <div class="field-row advanced-task-field">
+        <button type="button" id="advanced-task-toggle" class="advanced-toggle" onclick="toggleAdvancedTaskFields()" aria-expanded="false" aria-controls="advanced-task-fields">Show advanced options</button>
+        <div id="advanced-task-fields" class="advanced-task-fields hidden">
+          <div class="field-group">
+            <label>Repeat</label>
+            <select id="f-task-repeat" onchange="onTaskRepeatChange()">
+              <option value="none">Does not repeat</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly (same day)</option>
+              <option value="weekdays">Weekdays (Mon–Fri)</option>
+              <option value="weekends">Weekends (Sat–Sun)</option>
+              <option value="custom">Custom days</option>
+              <option value="interval">Every N days</option>
+            </select>
+          </div>
+          <div id="task-start-date-row" class="field-group hidden">
+            <label>Start date</label>
+            <input type="date" id="f-task-start-date">
+          </div>
+          <div id="task-repeat-custom" class="hidden">
+            <label class="field-label">Repeat on</label>
+            <div class="day-chips">
+              <label class="day-chip"><input type="checkbox" name="trday" value="1"><span>Mon</span></label>
+              <label class="day-chip"><input type="checkbox" name="trday" value="2"><span>Tue</span></label>
+              <label class="day-chip"><input type="checkbox" name="trday" value="3"><span>Wed</span></label>
+              <label class="day-chip"><input type="checkbox" name="trday" value="4"><span>Thu</span></label>
+              <label class="day-chip"><input type="checkbox" name="trday" value="5"><span>Fri</span></label>
+              <label class="day-chip"><input type="checkbox" name="trday" value="6"><span>Sat</span></label>
+              <label class="day-chip"><input type="checkbox" name="trday" value="0"><span>Sun</span></label>
+            </div>
+          </div>
+          <div id="task-repeat-interval" class="hidden field-group">
+            <label>Repeat every (days)</label>
+            <input type="number" id="f-task-interval" min="2" max="365" value="7" style="width:100px">
+          </div>
+          <div id="task-repeat-end-wrap" class="hidden">
+            <div class="field-row" style="margin-top:0">
+              <div class="field-group">
+                <label>Ends</label>
+                <select id="f-task-repeat-end-type" onchange="onTaskRepeatEndChange()">
+                  <option value="date">On a date</option>
+                  <option value="count">After N times</option>
+                </select>
+              </div>
+              <div class="field-group" id="task-repeat-end-date-wrap">
+                <label>End date</label>
+                <input type="date" id="f-task-repeat-end-date">
+              </div>
+              <div class="field-group hidden" id="task-repeat-end-count-wrap">
+                <label>Occurrences</label>
+                <input type="number" id="f-task-repeat-count" min="2" max="999" value="10">
+              </div>
+            </div>
+          </div>
           <div class="field-group"><label>Minimum block</label><input type="number" id="f-min-block" min="0.25" step="0.25" value="0.5"></div>
-          <label class="field-group check-field"><span>Can split across days</span><input type="checkbox" id="f-splittable" checked></label>
-        </div>
-        <div class="field-group advanced-task-field"><label>Don't schedule before <span style="font-style:italic;opacity:0.6">(optional)</span></label><input type="date" id="f-not-before" placeholder="Leave blank to start scheduling immediately"></div>
-        <div class="field-group advanced-task-field">
-          <label>Repeat</label>
-          <select id="f-task-repeat" onchange="onTaskRepeatChange()">
-            <option value="none">Does not repeat</option>
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly (same day)</option>
-            <option value="weekdays">Weekdays (Mon–Fri)</option>
-            <option value="weekends">Weekends (Sat–Sun)</option>
-            <option value="custom">Custom days</option>
-            <option value="interval">Every N days</option>
-          </select>
-        </div>
-        <div id="task-start-date-row" class="field-group hidden">
-          <label>Start date</label>
-          <input type="date" id="f-task-start-date">
-        </div>
-        <div id="task-repeat-custom" class="hidden">
-          <label class="field-label">Repeat on</label>
-          <div class="day-chips">
-            <label class="day-chip"><input type="checkbox" name="trday" value="1"><span>Mon</span></label>
-            <label class="day-chip"><input type="checkbox" name="trday" value="2"><span>Tue</span></label>
-            <label class="day-chip"><input type="checkbox" name="trday" value="3"><span>Wed</span></label>
-            <label class="day-chip"><input type="checkbox" name="trday" value="4"><span>Thu</span></label>
-            <label class="day-chip"><input type="checkbox" name="trday" value="5"><span>Fri</span></label>
-            <label class="day-chip"><input type="checkbox" name="trday" value="6"><span>Sat</span></label>
-            <label class="day-chip"><input type="checkbox" name="trday" value="0"><span>Sun</span></label>
+          <div class="field-group"><label>Don't schedule before <span style="font-style:italic;opacity:0.6">(optional)</span></label><input type="date" id="f-not-before" placeholder="Leave blank to start scheduling immediately"></div>
+          <div class="field-group" id="task-project-field">
+            <label>Project <span style="font-style:italic;opacity:0.6">(optional)</span></label>
+            <select id="f-project"><option value="">No project</option></select>
           </div>
-        </div>
-        <div id="task-repeat-interval" class="hidden field-group">
-          <label>Repeat every (days)</label>
-          <input type="number" id="f-task-interval" min="2" max="365" value="7" style="width:100px">
-        </div>
-        <div id="task-repeat-end-wrap" class="hidden">
-          <div class="field-row" style="margin-top:0">
-            <div class="field-group">
-              <label>Ends</label>
-              <select id="f-task-repeat-end-type" onchange="onTaskRepeatEndChange()">
-                <option value="date">On a date</option>
-                <option value="count">After N times</option>
-              </select>
-            </div>
-            <div class="field-group" id="task-repeat-end-date-wrap">
-              <label>End date</label>
-              <input type="date" id="f-task-repeat-end-date">
-            </div>
-            <div class="field-group hidden" id="task-repeat-end-count-wrap">
-              <label>Occurrences</label>
-              <input type="number" id="f-task-repeat-count" min="2" max="999" value="10">
-            </div>
-          </div>
+          <div class="field-group"><label>Description <span style="font-style:italic;opacity:0.6">(optional)</span></label><textarea id="f-description" rows="4" placeholder="Notes, context, or a clear definition of done"></textarea></div>
+          <label class="check-field"><input type="checkbox" id="f-splittable" checked><span>Can split across days</span></label>
         </div>
         <div id="task-manual-controls" class="manual-controls hidden">
           <div>
@@ -380,12 +380,46 @@
   </div>
 </div>
 
+<!-- TASK DETAILS -->
+<div id="task-detail-bg" class="modal-bg hidden">
+  <div class="modal task-detail-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-name" onclick="event.stopPropagation()">
+    <div class="modal-head">
+      <div>
+        <div class="task-detail-eyebrow">Task details</div>
+        <div class="modal-title task-detail-title-row">
+          <span id="task-detail-priority-symbol" class="priority-symbol" aria-hidden="true"></span>
+          <span id="task-detail-name"></span>
+        </div>
+      </div>
+      <button class="modal-x" onclick="closeTaskDetails()" aria-label="Close task details">✕</button>
+    </div>
+    <div class="modal-body task-detail-body">
+      <div class="task-detail-meta">
+        <div><span>Priority</span><strong id="task-detail-priority"></strong></div>
+        <div><span>Type</span><strong id="task-detail-type">Task</strong></div>
+      </div>
+      <div class="task-detail-section">
+        <span>Description</span>
+        <p id="task-detail-description"></p>
+      </div>
+      <div class="task-detail-meta">
+        <div><span>Deadline</span><strong id="task-detail-deadline"></strong></div>
+        <div><span>Expected hours</span><strong id="task-detail-hours"></strong></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-ghost" onclick="closeTaskDetails()">Close</button>
+      <button class="btn-primary" onclick="editTaskFromDetails()">Edit task</button>
+    </div>
+  </div>
+</div>
+
 <!-- DAILY HOURS EDITOR -->
 <div id="day-hours-bg" class="modal-bg hidden">
   <div class="modal day-hours-modal" onclick="event.stopPropagation()">
     <div class="modal-head">
       <div>
-        <div class="day-hours-eyebrow">User-controlled schedule</div>
+        <div class="day-hours-eyebrow" id="day-hours-eyebrow">User-controlled schedule</div>
         <div class="modal-title" id="day-hours-title">Adjust daily hours</div>
       </div>
       <button class="modal-x" onclick="closeDayHoursEditor()">✕</button>
@@ -413,7 +447,7 @@
     <div class="modal-foot day-hours-foot">
       <button id="day-hours-auto" class="btn-ghost" onclick="returnDayToAuto()">Use automatic hours</button>
       <button id="day-hours-all-auto" class="btn-ghost" onclick="returnOccurrenceToAuto()">Release all fixed days</button>
-      <button class="btn-primary" onclick="saveDayHours()">Save adjustment</button>
+      <button id="day-hours-save" class="btn-primary" onclick="saveHoursEditor()">Save adjustment</button>
     </div>
   </div>
 </div>

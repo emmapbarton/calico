@@ -103,3 +103,51 @@ test('recurring event, conflict resolution and partial check-in UI', async ({ pa
   await page.getByRole('button', { name: /done/i }).last().click();
   await expect(page.getByText(/unfinished work was returned/i)).toBeVisible();
 });
+
+test('task form, details and day actions use the tightened interaction model', async ({ page }) => {
+  await onboard(page);
+  await openAddModal(page, 'task');
+
+  await expect(page.locator('#f-priority option')).toHaveCount(2);
+  await expect(page.locator('#advanced-task-fields')).toBeHidden();
+  await page.getByRole('button', { name: /show advanced options/i }).click();
+  await expect(page.locator('#advanced-task-fields')).toBeVisible();
+  await page.getByRole('button', { name: /hide advanced options/i }).click();
+  await expect(page.locator('#advanced-task-fields')).toBeHidden();
+
+  await page.getByRole('button', { name: /show advanced options/i }).click();
+  await page.locator('#f-name').fill('Details flow task');
+  await page.locator('#f-description').fill('A read-only description for the detail panel.');
+  await page.locator('#f-hours').fill('2');
+  await page.locator('#f-deadline').fill(dateString());
+  await page.getByRole('button', { name: /^save$/i }).click();
+
+  await page.getByRole('button', { name: /^day$/i }).first().click();
+  const taskRow = page.locator('.day-item.task', { hasText: 'Details flow task' });
+  await expect(taskRow).toBeVisible();
+  await expect(taskRow.locator('.day-actions')).toHaveCSS('flex-direction', 'column');
+
+  await taskRow.locator('.day-title').click();
+  await expect(page.locator('#task-detail-bg')).toBeVisible();
+  await expect(page.locator('#task-detail-name')).toHaveText('Details flow task');
+  await expect(page.locator('#task-detail-description')).toHaveText('A read-only description for the detail panel.');
+  await expect(page.locator('#task-detail-priority-symbol')).toHaveClass(/mandatory/);
+  await expect(page.locator('#task-detail-hours')).toHaveText('2h');
+
+  await page.getByRole('button', { name: /edit task/i }).click();
+  await expect(page.locator('#modal-bg')).toBeVisible();
+  await expect(page.locator('#f-name')).toHaveValue('Details flow task');
+  await expect(page.locator('#advanced-task-fields')).toBeVisible();
+  await page.getByRole('button', { name: /cancel/i }).click();
+
+  await taskRow.getByRole('button', { name: /^partial$/i }).click();
+  await expect(page.locator('#day-hours-bg')).toBeVisible();
+  await expect(page.getByRole('button', { name: /save progress/i })).toBeVisible();
+  await page.locator('#day-hours-input').fill('1');
+  await page.getByRole('button', { name: /save progress/i }).click();
+  await expect(page.locator('#day-hours-bg')).toBeHidden();
+
+  const refreshedTaskRow = page.locator('.day-item.task', { hasText: 'Details flow task' });
+  await refreshedTaskRow.getByRole('button', { name: /^done$/i }).click();
+  await expect(page.locator('.day-item.task.completed', { hasText: 'Details flow task' })).toBeVisible();
+});

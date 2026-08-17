@@ -1591,9 +1591,10 @@ function renderSidebar() {
       const el  = document.createElement('div');
       el.className = `sb-pill${conflict?.type === 'soft' ? ' needs-review' : ''}`;
       el.innerHTML = `<span class="sb-dot" style="background:${safeColor(t.color)}"></span>
+        ${prioritySymbolMarkup(t.priority)}
         <span class="sb-name">${escapeHtml(t.name)}</span>
         <span class="sb-hrs">${conflict?.type === 'soft' ? roundHours(conflict.shortfall) + 'h short' : (rl ? rl : rem + 'h')}</span>`;
-      el.onclick = () => openModal('task', t.id);
+      el.onclick = () => openTaskDetails(t.id);
       sbTasks.appendChild(el);
     });
   });
@@ -1835,7 +1836,7 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     // any chunk moves the occurrence's full allocation for that day.
     block.dataset.hrs      = taskHoursOnDay(item, sourceDs);
     block.addEventListener('dragstart', onTaskDragStart);
-    block.addEventListener('click', e => { if (!e._wasDrag) openModal('task', item.id); });
+    block.addEventListener('click', e => { if (!e._wasDrag) openTaskDetails(item.id); });
 
     const actions = document.createElement('div');
     actions.className = 'wk-block-actions';
@@ -1923,21 +1924,14 @@ function renderDay() {
       const completion = taskCompletionState(entry.item, dateStr);
       const fixed = hasManualOverrideForTaskDate(entry.item.id, dateStr);
       row.classList.toggle('completed', completion.done);
-      row.innerHTML = `<div class="day-time">${roundHours(entry.hours)}h</div><div class="day-card"><div class="day-kind">Calico work block · ${fixed ? 'fixed by you' : 'flexible'}</div><div class="day-title">${escapeHtml(entry.item.name)}</div><div class="day-actions"><button type="button" data-action="done">${completion.done ? 'Mark not done' : 'Done'}</button><button type="button" data-action="partial">Partial</button><button type="button" data-action="adjust">Adjust</button>${fixed ? '<button type="button" data-action="auto">Auto</button>' : ''}</div></div>`;
+      row.innerHTML = `<div class="day-time">${roundHours(entry.hours)}h</div><div class="day-card"><div class="day-card-copy"><div class="day-kind">${prioritySymbolMarkup(entry.item.priority)} Calico work block · ${fixed ? 'fixed by you' : 'flexible'}</div><div class="day-title">${escapeHtml(entry.item.name)}</div></div><div class="day-actions" aria-label="Task actions"><button type="button" data-action="done">${completion.done ? 'Undo done' : 'Done'}</button><button type="button" data-action="partial">Partial</button><button type="button" data-action="adjust">Adjust</button></div></div>`;
       row.querySelector('[data-action="done"]').onclick = e => { e.stopPropagation(); toggleTaskLog(entry.item, dateStr, entry.hours); };
-      row.querySelector('[data-action="partial"]').onclick = e => { e.stopPropagation(); promptTaskPartial(entry.item, dateStr, entry.hours); };
+      row.querySelector('[data-action="partial"]').onclick = e => { e.stopPropagation(); openTaskPartialEditor(entry.item, dateStr, entry.hours); };
       row.querySelector('[data-action="adjust"]').onclick = e => { e.stopPropagation(); openDayHoursEditor(entry.item.id, dateStr); };
-      row.querySelector('[data-action="auto"]')?.addEventListener('click', e => { e.stopPropagation(); returnTaskDayToAuto(entry.item.id, dateStr); });
-      row.onclick = () => openModal('task', entry.item.id);
+      row.onclick = () => openTaskDetails(entry.item.id);
     }
     list.appendChild(row);
   });
-}
-
-function promptTaskPartial(task, dateStr, scheduledHrs = taskHoursOnDay(task, dateStr)) {
-  const raw = prompt(`How many of ${roundHours(scheduledHrs)}h did you complete?`, String(roundHours(scheduledHrs / 2)));
-  if (raw === null) return;
-  recordTaskCheckin(task, dateStr, scheduledHrs, parseFloat(raw));
 }
 
 /* ── Agenda view ── */
@@ -2093,10 +2087,7 @@ function makeAgendaTaskRow(task, dStr) {
   }
 
   const taskRl    = repeatLabel(task);
-  const priBadge  = task.priority === 'optional'
-    ? `<span class="badge badge-opt">optional</span>`
-    : task.priority === 'deferred' ? `<span class="badge badge-opt">deferred</span>` : '';
-  const mandBadge = task.priority === 'mandatory' ? `<span class="badge">mandatory</span>` : '';
+  const priBadge = `<span class="badge badge-priority${task.priority === 'mandatory' ? '' : ' badge-opt'}">${prioritySymbolMarkup(task.priority)}${taskPriorityLabel(task).toLowerCase()}</span>`;
   const statusBadge = isDone
     ? `<span class="badge badge-done">done</span>`
     : isMissed ? `<span class="badge badge-missed">missed</span>` : '';
@@ -2117,7 +2108,7 @@ function makeAgendaTaskRow(task, dStr) {
     <div class="ag-task-accent"></div>
     <div class="ag-task-name">${escapeHtml(task.name)}</div>
     <div class="ag-task-badges">
-      ${mandBadge}${priBadge}${statusBadge}${schedulingBadge}${redistBadge}
+      ${priBadge}${statusBadge}${schedulingBadge}${redistBadge}
       ${taskRl ? `<span class="repeat-badge">${taskRl}</span>` : ''}
     </div>
     ${hrsDisplay}`;
@@ -2167,7 +2158,7 @@ function makeAgendaTaskRow(task, dStr) {
       el.appendChild(autoBtn);
     }
   }
-  el.addEventListener('click', () => openModal('task', task.id));
+  el.addEventListener('click', () => openTaskDetails(task.id));
   return el;
 }
 
@@ -2955,16 +2946,15 @@ function onTypeChange() {
 
 function syncAdvancedTaskFields(forceOpen) {
   const type = document.getElementById('f-type')?.value || 'task';
-  const open = type === 'event' || forceOpen || document.getElementById('advanced-task-toggle')?.dataset.open === 'true';
-  document.querySelectorAll('.advanced-task-field').forEach(el => {
-    el.classList.toggle('hidden', type === 'task' && !open);
-    el.classList.toggle('hidden', type !== 'task' && el.id === 'task-project-field');
-  });
   const toggle = document.getElementById('advanced-task-toggle');
+  const current = toggle?.dataset.open === 'true';
+  const open = type === 'task' && (typeof forceOpen === 'boolean' ? forceOpen : current);
+  document.getElementById('advanced-task-fields')?.classList.toggle('hidden', !open);
   if (toggle) {
     toggle.classList.toggle('hidden', type !== 'task');
     toggle.dataset.open = open ? 'true' : 'false';
-    toggle.textContent = open ? 'Hide advanced options' : 'Advanced options';
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.textContent = open ? 'Hide advanced options' : 'Show advanced options';
   }
 }
 
@@ -3031,6 +3021,51 @@ function returnEditedTaskToAuto() {
   showToast('All days for this task are automatic again');
 }
 
+let detailTaskId = null;
+
+function taskPriorityLabel(task) {
+  return task?.priority === 'mandatory' ? 'Mandatory' : 'Optional';
+}
+
+function prioritySymbolMarkup(priority) {
+  const kind = priority === 'mandatory' ? 'mandatory' : 'optional';
+  const label = kind === 'mandatory' ? 'Mandatory' : 'Optional';
+  return `<span class="priority-symbol ${kind}" role="img" aria-label="${label}" title="${label}"></span>`;
+}
+
+function openTaskDetails(taskId) {
+  const task = S.tasks.find(candidate => candidate.id === taskId);
+  if (!task) return;
+  detailTaskId = task.id;
+
+  document.getElementById('task-detail-name').textContent = task.name;
+  document.getElementById('task-detail-priority').textContent = taskPriorityLabel(task);
+  document.getElementById('task-detail-type').textContent = 'Task';
+  document.getElementById('task-detail-description').textContent =
+    task.description?.trim() || 'No description added.';
+  document.getElementById('task-detail-deadline').textContent = task.deadline
+    ? parseDate(task.deadline).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+    : 'No deadline';
+  document.getElementById('task-detail-hours').textContent = `${roundHours(task.hours || 0)}h`;
+
+  const symbol = document.getElementById('task-detail-priority-symbol');
+  symbol.className = `priority-symbol ${task.priority === 'mandatory' ? 'mandatory' : 'optional'}`;
+  symbol.setAttribute('title', taskPriorityLabel(task));
+  document.getElementById('task-detail-bg').classList.remove('hidden');
+}
+
+function closeTaskDetails() {
+  document.getElementById('task-detail-bg')?.classList.add('hidden');
+  detailTaskId = null;
+}
+
+function editTaskFromDetails() {
+  const taskId = detailTaskId;
+  if (!taskId) return;
+  closeTaskDetails();
+  openModal('task', taskId);
+}
+
 function openModal(type, id) {
   editingId   = id ?? null;
   editingType = type;
@@ -3055,7 +3090,7 @@ function openModal(type, id) {
     if (item) {
       document.getElementById('f-name').value     = item.name;
       document.getElementById('f-type').value     = item.type || type;
-      document.getElementById('f-priority').value = item.priority || 'mandatory';
+      document.getElementById('f-priority').value = item.priority === 'mandatory' ? 'mandatory' : 'optional';
       onTypeChange();
       if ((item.type||type) === 'task') {
         syncAdvancedTaskFields(true);
@@ -3063,10 +3098,10 @@ function openModal(type, id) {
         document.getElementById('f-deadline').value     = item.deadline || todayVal;
         document.getElementById('f-task-start-date').value = item.date || item.deadline || todayVal;
         document.getElementById('f-hours').value        = item.hours || 4;
-        document.getElementById('f-dist').value         = item.dist     || 'inherit';
         document.getElementById('f-min-block').value    = item.minBlockHours || S.minBlockHours || 0.5;
         document.getElementById('f-splittable').checked = item.splittable !== false;
         document.getElementById('f-not-before').value    = item.notBefore || '';
+        document.getElementById('f-description').value   = item.description || '';
         document.getElementById('f-task-repeat').value  = item.repeat || 'none';
         onTaskRepeatChange();
         if (item.repeat && item.repeat !== 'none') {
@@ -3111,10 +3146,10 @@ function openModal(type, id) {
     document.getElementById('f-name').value          = '';
     document.getElementById('f-priority').value       = 'mandatory';
     document.getElementById('f-hours').value          = 4;
-    document.getElementById('f-dist').value           = 'inherit';
     document.getElementById('f-min-block').value      = S.minBlockHours || 0.5;
     document.getElementById('f-splittable').checked   = true;
     document.getElementById('f-not-before').value    = '';
+    document.getElementById('f-description').value   = '';
     document.getElementById('f-start').value          = '09:00';
     document.getElementById('f-end').value            = '10:00';
     document.getElementById('f-repeat').value         = 'none';
@@ -3148,14 +3183,16 @@ function saveItem() {
 
   if (type === 'task') {
     const repeatVal = document.getElementById('f-task-repeat').value;
+    const existingTask = editingId ? S.tasks.find(task => task.id === editingId) : null;
     const obj = {
       id: editingId || uid(),
       type: 'task', name, priority, color,
       projectId: document.getElementById('f-project').value || null,
+      description: document.getElementById('f-description').value.trim(),
       deadline: document.getElementById('f-deadline').value,
       date:     document.getElementById('f-deadline').value,
       hours:    parseFloat(document.getElementById('f-hours').value) || 4,
-      dist:       document.getElementById('f-dist').value,
+      dist:       existingTask?.dist || 'inherit',
       minBlockHours: finiteNumber(document.getElementById('f-min-block').value, S.minBlockHours || 0.5, 0.25, 24),
       splittable: document.getElementById('f-splittable').checked,
       notBefore:  document.getElementById('f-not-before').value || null,
@@ -3314,6 +3351,7 @@ document.addEventListener('click', function(e) {
   if (e.target.id === 'conflict-bg') closeConflict();
   if (e.target.id === 'review-bg') closeReviewPanel();
   if (e.target.id === 'day-hours-bg') closeDayHoursEditor();
+  if (e.target.id === 'task-detail-bg') closeTaskDetails();
   if (!e.target.closest('.quick-search')) closeSearchResults();
 });
 
@@ -3327,7 +3365,7 @@ function searchMatches(query) {
   const hits = [];
   S.tasks.forEach(task => {
     const project = projectForTask(task);
-    const hay = [task.name, task.deadline, task.priority, project?.name].filter(Boolean).join(' ').toLowerCase();
+    const hay = [task.name, task.description, task.deadline, task.priority, project?.name].filter(Boolean).join(' ').toLowerCase();
     if (hay.includes(q)) hits.push({ type: 'task', id: task.id, label: task.name, meta: project?.name || task.deadline || 'Task' });
   });
   S.events.forEach(ev => {
@@ -3369,7 +3407,7 @@ function openSearchHit(hit) {
   const input = document.getElementById('global-search');
   if (input) input.value = '';
   closeSearchResults();
-  if (hit.type === 'task') openModal('task', hit.id);
+  if (hit.type === 'task') openTaskDetails(hit.id);
   else if (hit.type === 'event') openModal('event', hit.id);
   else if (hit.type === 'project') { setView('settings'); setTimeout(() => document.getElementById('settings-project-list')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0); }
 }
@@ -3380,7 +3418,7 @@ function isTypingTarget(target) {
 
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
-    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor(); closeSearchResults();
+    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor(); closeTaskDetails(); closeSearchResults();
     document.getElementById('checkin-bg')?.classList.add('hidden');
     return;
   }
@@ -3757,6 +3795,9 @@ function returnTaskDayToAuto(taskId, dStr) {
 let _dayHoursOccId = null;
 let _dayHoursDate = null;
 let _dayHoursOriginal = 0;
+let _hoursEditorMode = 'adjust';
+let _partialTaskId = null;
+let _partialScheduled = 0;
 
 function dayHoursOccurrence() {
   const plan = allocateSchedule();
@@ -3786,7 +3827,11 @@ function openDayHoursEditor(taskId, dateStr, occurrenceId) {
   _dayHoursOccId = occ.occId;
   _dayHoursDate = dateStr;
   _dayHoursOriginal = roundHours(fixed === undefined ? scheduled : fixed);
+  _hoursEditorMode = 'adjust';
+  _partialTaskId = null;
+  _partialScheduled = 0;
 
+  document.getElementById('day-hours-eyebrow').textContent = 'User-controlled schedule';
   document.getElementById('day-hours-title').textContent = task?.name || occ.name || 'Adjust daily hours';
   document.getElementById('day-hours-date').textContent =
     parseDate(dateStr).toLocaleDateString('en-GB', {
@@ -3796,6 +3841,7 @@ function openDayHoursEditor(taskId, dateStr, occurrenceId) {
   const input = document.getElementById('day-hours-input');
   input.value = _dayHoursOriginal;
   input.max = maxConstraintHoursForDate(occ, dateStr);
+  document.getElementById('day-hours-save').textContent = 'Save adjustment';
   document.getElementById('day-hours-auto').classList.toggle('hidden', fixed === undefined);
   document.getElementById('day-hours-all-auto').classList.toggle(
     'hidden',
@@ -3814,10 +3860,47 @@ function openDayHoursEditor(taskId, dateStr, occurrenceId) {
   input.select();
 }
 
+function openTaskPartialEditor(task, dateStr, scheduledHrs = taskHoursOnDay(task, dateStr)) {
+  const scheduled = roundHours(Math.max(0, Number(scheduledHrs) || 0));
+  if (scheduled <= 0) {
+    showToast('There are no scheduled hours to record');
+    return;
+  }
+
+  const existing = S.taskLog[task.id + '|' + dateStr];
+  _hoursEditorMode = 'partial';
+  _partialTaskId = task.id;
+  _partialScheduled = scheduled;
+  _dayHoursOccId = null;
+  _dayHoursDate = dateStr;
+  _dayHoursOriginal = roundHours(existing?.completed ?? scheduled / 2);
+
+  document.getElementById('day-hours-eyebrow').textContent = 'Task progress';
+  document.getElementById('day-hours-title').textContent = task.name;
+  document.getElementById('day-hours-date').textContent =
+    `${parseDate(dateStr).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' })} · ${scheduled}h scheduled`;
+  document.getElementById('day-hours-warning').classList.add('hidden');
+  document.getElementById('day-hours-locks-wrap').classList.add('hidden');
+  document.getElementById('day-hours-auto').classList.add('hidden');
+  document.getElementById('day-hours-all-auto').classList.add('hidden');
+  document.getElementById('day-hours-save').textContent = 'Save progress';
+
+  const input = document.getElementById('day-hours-input');
+  input.value = _dayHoursOriginal;
+  input.max = scheduled;
+  previewDayHours();
+  document.getElementById('day-hours-bg').classList.remove('hidden');
+  input.focus();
+  input.select();
+}
+
 function closeDayHoursEditor() {
   document.getElementById('day-hours-bg').classList.add('hidden');
   _dayHoursOccId = null;
   _dayHoursDate = null;
+  _partialTaskId = null;
+  _partialScheduled = 0;
+  _hoursEditorMode = 'adjust';
 }
 
 function renderDayHoursLocks(occ, focusDate) {
@@ -3840,6 +3923,20 @@ function renderDayHoursLocks(occ, focusDate) {
 }
 
 function previewDayHours() {
+  if (_hoursEditorMode === 'partial') {
+    const input = document.getElementById('day-hours-input');
+    const completed = roundHours(Math.max(0, Number(input.value) || 0));
+    const note = document.getElementById('day-hours-note');
+    note.classList.toggle('bad', completed > _partialScheduled + ALLOC_EPSILON);
+    if (completed > _partialScheduled + ALLOC_EPSILON) {
+      note.textContent = `Completed hours cannot exceed the ${_partialScheduled}h scheduled.`;
+    } else if (completed >= _partialScheduled - ALLOC_EPSILON) {
+      note.textContent = 'This task block will be marked done.';
+    } else {
+      note.textContent = `${roundHours(_partialScheduled - completed)}h remains and will be replanned.`;
+    }
+    return;
+  }
   const occ = dayHoursOccurrence();
   if (!occ) return;
   const input = document.getElementById('day-hours-input');
@@ -3865,7 +3962,9 @@ function previewDayHours() {
 
 function stepDayHours(delta) {
   const input = document.getElementById('day-hours-input');
-  input.value = roundHours(Math.max(0, (Number(input.value) || 0) + delta));
+  const max = Number(input.max);
+  const next = Math.max(0, (Number(input.value) || 0) + delta);
+  input.value = roundHours(Number.isFinite(max) ? Math.min(max, next) : next);
   previewDayHours();
 }
 
@@ -3877,6 +3976,27 @@ function showDayHoursWarning(shortfall) {
   document.getElementById('day-hours-warning-copy').textContent =
     'Your fixed days have been kept. Adjust or release one of them, or close this panel and resolve the remaining conflict separately.';
   warning.classList.remove('hidden');
+}
+
+function saveHoursEditor() {
+  if (_hoursEditorMode === 'partial') saveTaskPartialHours();
+  else saveDayHours();
+}
+
+function saveTaskPartialHours() {
+  const task = S.tasks.find(candidate => candidate.id === _partialTaskId);
+  if (!task) return;
+  const input = document.getElementById('day-hours-input');
+  const completed = roundHours(Math.max(0, Number(input.value) || 0));
+  if (completed > _partialScheduled + ALLOC_EPSILON) {
+    previewDayHours();
+    input.focus();
+    return;
+  }
+  const dateStr = _dayHoursDate;
+  const scheduled = _partialScheduled;
+  closeDayHoursEditor();
+  recordTaskCheckin(task, dateStr, scheduled, completed);
 }
 
 function saveDayHours() {

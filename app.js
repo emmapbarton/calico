@@ -73,6 +73,31 @@ function finiteNumber(value, fallback, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
+function workingHoursSettings(dayStart, dayEnd, maxDailyHours, minBlockHours) {
+  if (!dayStart || !dayEnd) return null;
+  const startHours = timeH(dayStart || '');
+  const endHours = timeH(dayEnd || '');
+  if (!Number.isFinite(startHours) || !Number.isFinite(endHours) || endHours <= startHours) return null;
+  return {
+    dayStart,
+    dayEnd,
+    maxDailyHours: finiteNumber(maxDailyHours, 8, 0.5, 24),
+    minBlockHours: finiteNumber(minBlockHours, 0.5, 0.25, 24),
+  };
+}
+
+function taskHoursFromInput(value) {
+  const hours = Number(value);
+  return Number.isFinite(hours) && hours >= 0.5 ? hours : null;
+}
+
+function eventTimeRangeIsValid(start, end) {
+  if (!start || !end) return false;
+  const startHours = timeH(start || '');
+  const endHours = timeH(end || '');
+  return Number.isFinite(startHours) && Number.isFinite(endHours) && endHours > startHours;
+}
+
 function isCalicoStateDocument(candidate) {
   return !!(candidate && typeof candidate === 'object' && !Array.isArray(candidate)
     && Array.isArray(candidate.tasks) && Array.isArray(candidate.events));
@@ -89,6 +114,17 @@ function normalizeState(input) {
   next.baseline = finiteNumber(next.baseline, 7, 1, 10);
   next.maxDailyHours = finiteNumber(next.maxDailyHours, 8, 0.5, 24);
   next.minBlockHours = finiteNumber(next.minBlockHours, 0.5, 0.25, 24);
+  const normalizedWorkingHours = workingHoursSettings(
+    next.dayStart,
+    next.dayEnd,
+    next.maxDailyHours,
+    next.minBlockHours
+  );
+  if (normalizedWorkingHours) Object.assign(next, normalizedWorkingHours);
+  else {
+    next.dayStart = DEFAULT_STATE.dayStart;
+    next.dayEnd = DEFAULT_STATE.dayEnd;
+  }
   next.splitTasks = next.splitTasks !== false;
   next.weekdayCapacity = next.weekdayCapacity && typeof next.weekdayCapacity === 'object' ? next.weekdayCapacity : {};
   for (let i = 0; i < 7; i++) {
@@ -230,8 +266,15 @@ function undoLastAction() {
   showToast(`Undid ${previous.label}`);
 }
 
+function stateForBackup(state = S) {
+  const backup = cloneData(state);
+  backup.cloud = { ...(backup.cloud || {}) };
+  delete backup.cloud.token;
+  return backup;
+}
+
 function exportData() {
-  const payload = JSON.stringify({ exportedAt: new Date().toISOString(), state: S }, null, 2);
+  const payload = JSON.stringify({ exportedAt: new Date().toISOString(), state: stateForBackup() }, null, 2);
   const blob = new Blob([payload], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -1358,6 +1401,34 @@ function computeConflict(taskObj) {
   };
 }
 
+function taskEstimateFits(taskObj, hours) {
+  const candidate = { ...taskObj, hours };
+  const { allocated, plan, taskId } = allocationForHypotheticalTask(candidate);
+  const conflict = plan.conflicts?.[taskId];
+  return allocated + ALLOC_EPSILON >= hours
+    && (!conflict || (conflict.shortfall || 0) <= ALLOC_EPSILON);
+}
+
+function maximumFittingTaskHours(taskObj) {
+  const requested = taskHoursFromInput(taskObj.hours);
+  if (requested === null) return null;
+
+  let low = 1;
+  let high = Math.max(1, Math.floor((requested + ALLOC_EPSILON) * 2));
+  let best = 0;
+  while (low <= high) {
+    const midpoint = Math.floor((low + high) / 2);
+    const hours = midpoint / 2;
+    if (taskEstimateFits(taskObj, hours)) {
+      best = midpoint;
+      low = midpoint + 1;
+    } else {
+      high = midpoint - 1;
+    }
+  }
+  return best ? best / 2 : null;
+}
+
 function findEarliestFittingDeadline(taskObj) {
   let cur = parseDate(taskObj.deadline);
   const hardLimit = addDays(today(), 365);
@@ -2255,8 +2326,12 @@ function showConflictDialog(conflict, taskObj) {
   updateDeadlineBadge();
 
   // Option 2 — hours reduction
-  document.getElementById('copt-hours').value = conflict.avail;
-  document.getElementById('copt-hours-note').textContent = 'Max that fits by current deadline: ' + conflict.avail + 'h';
+  const reducedHours = maximumFittingTaskHours(taskObj);
+  const hoursInput = document.getElementById('copt-hours');
+  hoursInput.disabled = reducedHours === null;
+  hoursInput.value = reducedHours ?? 0.5;
+  document.getElementById('copt-2')?.classList.toggle('disabled', reducedHours === null);
+  updateHoursReductionBadge();
 
   // Option 3 — overwork day chips
   buildOverworkChips();
@@ -2289,6 +2364,10 @@ function discardConflictTask() {
 }
 
 function selectCopt(n) {
+  if (n === 2 && document.getElementById('copt-hours')?.disabled) {
+    showToast('No valid reduced estimate fits within this deadline.');
+    return;
+  }
   setConflictAlternativesExpanded(true);
   for (let i=1;i<=7;i++) {
     const el = document.getElementById('copt-'+i);
@@ -2344,7 +2423,29 @@ function updateDeadlineBadge() {
 
 document.addEventListener('input', function(e) {
   if (e.target.id === 'copt-deadline') updateDeadlineBadge();
+  if (e.target.id === 'copt-hours') updateHoursReductionBadge();
 });
+
+function updateHoursReductionBadge() {
+  const input = document.getElementById('copt-hours');
+  const badge = document.getElementById('copt-hours-badge');
+  const note = document.getElementById('copt-hours-note');
+  if (!input || !badge || !note || !_conflictTask) return;
+
+  const maximum = maximumFittingTaskHours(_conflictTask);
+  if (maximum === null) {
+    badge.textContent = 'no fit';
+    badge.className = 'copt-badge';
+    note.textContent = 'No estimate of at least 0.5h can fit by the current deadline.';
+    return;
+  }
+
+  const hours = taskHoursFromInput(input.value);
+  const fits = hours !== null && taskEstimateFits(_conflictTask, hours);
+  badge.textContent = fits ? 'fits exactly' : 'still too large';
+  badge.className = fits ? 'copt-badge ok' : 'copt-badge';
+  note.textContent = 'Max that fits by current deadline: ' + maximum + 'h';
+}
 
 function buildOverworkChips() {
   const container = document.getElementById('copt-day-chips');
@@ -2501,7 +2602,9 @@ function applyConflictSelectionToState(selected, baseTask, editId) {
     task.deadline = newDeadline;
     if (!task.repeat || task.repeat === 'none') task.date = newDeadline;
   } else if (selected === 2) {
-    task.hours = Math.max(0.5, parseFloat(document.getElementById('copt-hours').value) || 0.5);
+    const reducedHours = taskHoursFromInput(document.getElementById('copt-hours').value);
+    if (reducedHours === null) return null;
+    task.hours = reducedHours;
   } else if (selected === 4) {
     task.priority = 'optional';
   } else if (selected === 5) {
@@ -2877,12 +2980,17 @@ function saveDist() {
 }
 
 function saveWorkingHours() {
-  S.dayStart = document.getElementById('settings-day-start').value;
-  S.dayEnd   = document.getElementById('settings-day-end').value;
+  const dayStart = document.getElementById('settings-day-start');
+  const dayEnd = document.getElementById('settings-day-end');
   const mdh = document.getElementById('settings-max-daily-hours');
-  if (mdh) S.maxDailyHours = Math.max(0.5, parseFloat(mdh.value) || 8);
   const minBlock = document.getElementById('settings-min-block');
-  if (minBlock) S.minBlockHours = finiteNumber(minBlock.value, 0.5, 0.25, 24);
+  const settings = workingHoursSettings(dayStart.value, dayEnd.value, mdh?.value, minBlock?.value);
+  if (!settings) {
+    dayEnd.focus();
+    showToast('Day end must be later than day start.');
+    return;
+  }
+  Object.assign(S, settings);
   save(); render();
   revalidateExistingTasks(true);
   showToast('Working hours saved');
@@ -3184,6 +3292,12 @@ function saveItem() {
   if (type === 'task') {
     const repeatVal = document.getElementById('f-task-repeat').value;
     const existingTask = editingId ? S.tasks.find(task => task.id === editingId) : null;
+    const taskHours = taskHoursFromInput(document.getElementById('f-hours').value);
+    if (taskHours === null) {
+      document.getElementById('f-hours').focus();
+      showToast('Expected hours must be at least 0.5h.');
+      return;
+    }
     const obj = {
       id: editingId || uid(),
       type: 'task', name, priority, color,
@@ -3191,7 +3305,7 @@ function saveItem() {
       description: document.getElementById('f-description').value.trim(),
       deadline: document.getElementById('f-deadline').value,
       date:     document.getElementById('f-deadline').value,
-      hours:    parseFloat(document.getElementById('f-hours').value) || 4,
+      hours:    taskHours,
       dist:       existingTask?.dist || 'inherit',
       minBlockHours: finiteNumber(document.getElementById('f-min-block').value, S.minBlockHours || 0.5, 0.25, 24),
       splittable: document.getElementById('f-splittable').checked,
@@ -3244,12 +3358,19 @@ function saveItem() {
   } else {
     // Event — save directly
     const repeatVal = document.getElementById('f-repeat').value;
+    const start = document.getElementById('f-start').value;
+    const end = document.getElementById('f-end').value;
+    if (!eventTimeRangeIsValid(start, end)) {
+      document.getElementById('f-end').focus();
+      showToast('Event end must be later than its start.');
+      return;
+    }
     const obj = {
       id: editingId || uid(),
       type: 'event', name, priority, color,
       date:  document.getElementById('f-date').value,
-      start: document.getElementById('f-start').value,
-      end:   document.getElementById('f-end').value,
+      start,
+      end,
       repeat: repeatVal,
     };
     if (repeatVal !== 'none') {

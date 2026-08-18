@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-08-04T20:49:10.225Z",
-  "total": 58,
-  "passed": 58,
+  "generatedAt": "2026-08-18T20:56:09.611Z",
+  "total": 62,
+  "passed": 62,
   "failed": 0,
   "results": [
     {
@@ -230,6 +230,22 @@
     },
     {
       "name": "cloud sync payload omits bearer tokens",
+      "status": "PASS"
+    },
+    {
+      "name": "release gate: working-hour inputs normalize immediately and reject reversed windows",
+      "status": "PASS"
+    },
+    {
+      "name": "release gate: invalid task hours and event ranges are rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "release gate: reduction finds the largest schedulable non-splittable estimate",
+      "status": "PASS"
+    },
+    {
+      "name": "release gate: exported backups omit cloud access tokens without mutating local state",
       "status": "PASS"
     },
     {

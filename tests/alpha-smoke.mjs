@@ -1047,6 +1047,44 @@ test('cloud sync payload omits bearer tokens', () => {
   assert.equal(Object.hasOwn(state.cloud, 'token'), false);
 });
 
+test('release gate: working-hour inputs normalize immediately and reject reversed windows', () => {
+  assert.deepEqual(workingHoursSettings('09:00', '18:00', 999, -1), {
+    dayStart: '09:00',
+    dayEnd: '18:00',
+    maxDailyHours: 24,
+    minBlockHours: 0.25,
+  });
+  assert.equal(workingHoursSettings('18:00', '09:00', 8, 0.5), null);
+  const recovered = normalizeState({ dayStart: '18:00', dayEnd: '09:00', tasks: [], events: [] });
+  assert.equal(recovered.dayStart, '09:00');
+  assert.equal(recovered.dayEnd, '18:00');
+});
+
+test('release gate: invalid task hours and event ranges are rejected', () => {
+  assert.equal(taskHoursFromInput(0), null);
+  assert.equal(taskHoursFromInput(-1), null);
+  assert.equal(taskHoursFromInput(0.5), 0.5);
+  assert.equal(eventTimeRangeIsValid('17:00', '09:00'), false);
+  assert.equal(eventTimeRangeIsValid('09:00', '09:00'), false);
+  assert.equal(eventTimeRangeIsValid('09:00', '10:00'), true);
+});
+
+test('release gate: reduction finds the largest schedulable non-splittable estimate', () => {
+  resetState({ maxDailyHours: 4 });
+  const task = makeTask('reduce-whole', 5, 2, { splittable: false });
+  assert.equal(maximumFittingTaskHours(task), 4);
+  assert.equal(taskEstimateFits(task, 4), true);
+  assert.equal(taskEstimateFits(task, 4.5), false);
+});
+
+test('release gate: exported backups omit cloud access tokens without mutating local state', () => {
+  resetState({ cloud: { endpoint: 'https://example.test/state', token: 'secret-token' } });
+  const backup = stateForBackup();
+  assert.equal(backup.cloud.endpoint, 'https://example.test/state');
+  assert.equal(Object.hasOwn(backup.cloud, 'token'), false);
+  assert.equal(S.cloud.token, 'secret-token');
+});
+
 test('cloud load validation rejects non-Calico documents', () => {
   assert.equal(isCalicoStateDocument({}), false);
   assert.equal(isCalicoStateDocument({ tasks: [], events: [] }), true);

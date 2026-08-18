@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import fs from 'node:fs/promises';
 
 async function onboard(page) {
   await page.goto('/');
@@ -150,4 +151,63 @@ test('task form, details and day actions use the tightened interaction model', a
   const refreshedTaskRow = page.locator('.day-item.task', { hasText: 'Details flow task' });
   await refreshedTaskRow.getByRole('button', { name: /^done$/i }).click();
   await expect(page.locator('.day-item.task.completed', { hasText: 'Details flow task' })).toBeVisible();
+});
+
+test('release gate guards invalid inputs, conflict reductions and backup credentials', async ({ page }) => {
+  await onboard(page);
+  await page.getByRole('button', { name: /settings/i }).first().click();
+
+  await page.locator('#settings-max-daily-hours').fill('999');
+  await page.getByRole('button', { name: /save hours/i }).click();
+  await expect(page.locator('#settings-max-daily-hours')).toHaveValue('24');
+
+  await page.locator('#settings-day-start').fill('18:00');
+  await page.locator('#settings-day-end').fill('09:00');
+  await page.getByRole('button', { name: /save hours/i }).click();
+  await expect(page.getByText('Day end must be later than day start.', { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => [S.dayStart, S.dayEnd])).toEqual(['09:00', '18:00']);
+
+  await openAddModal(page, 'task');
+  await page.locator('#f-name').fill('Invalid zero task');
+  await page.locator('#f-hours').fill('0');
+  await page.getByRole('button', { name: /^save$/i }).click();
+  await expect(page.locator('#modal-bg')).toBeVisible();
+  await expect(page.getByText('Expected hours must be at least 0.5h.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: /cancel/i }).click();
+
+  await openAddModal(page, 'event');
+  await page.locator('#f-name').fill('Invalid backwards event');
+  await page.locator('#f-start').fill('17:00');
+  await page.locator('#f-end').fill('09:00');
+  await page.getByRole('button', { name: /^save$/i }).click();
+  await expect(page.locator('#modal-bg')).toBeVisible();
+  await expect(page.getByText('Event end must be later than its start.', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: /cancel/i }).click();
+
+  await page.locator('#settings-day-start').fill('09:00');
+  await page.locator('#settings-day-end').fill('18:00');
+  await page.locator('#settings-max-daily-hours').fill('4');
+  await page.getByRole('button', { name: /save hours/i }).click();
+  await openAddModal(page, 'task');
+  await page.locator('#f-name').fill('Non-splittable reduction');
+  await page.locator('#f-hours').fill('5');
+  await page.locator('#f-deadline').fill(dateString(1));
+  await page.getByRole('button', { name: /show advanced options/i }).click();
+  await page.locator('#f-splittable').uncheck();
+  await page.getByRole('button', { name: /^save$/i }).click();
+  await expect(page.locator('#conflict-bg')).toBeVisible();
+  await expect(page.locator('#copt-hours')).toHaveValue('4');
+  await expect(page.locator('#copt-hours-note')).toHaveText('Max that fits by current deadline: 4h');
+  await page.getByRole('button', { name: /discard task/i }).click();
+
+  await page.evaluate(() => {
+    S.cloud = { endpoint: '', token: 'release-gate-secret', lastSyncAt: null, lastError: '' };
+    save();
+  });
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: /export backup/i }).click();
+  const download = await downloadPromise;
+  const backup = JSON.parse(await fs.readFile(await download.path(), 'utf8'));
+  expect(backup.state.cloud.token).toBeUndefined();
+  expect(await page.evaluate(() => S.cloud.token)).toBe('release-gate-secret');
 });

@@ -21,7 +21,7 @@ function updateAllSliderFills() {
    STATE
 ══════════════════════════════════════════ */
 const DEFAULT_STATE = {
-  stateVersion: 4,
+  stateVersion: 5,
   onboarded: false,
   baseline: 7,
   distribution: 'even',
@@ -29,6 +29,7 @@ const DEFAULT_STATE = {
   dayEnd: '18:00',
   maxDailyHours: 8,
   weekdayCapacity: {}, // JS day index (0=Sun) → default max task hours for that weekday
+  dailyWorkingHours: {}, // dateStr -> { dayStart, dayEnd, maxDailyHours }
   minBlockHours: 0.5,
   splitTasks: true,
   taskOverworkAllowances: {}, // 'taskId|deadline|dateStr' → extra hours for that task occurrence only
@@ -45,7 +46,8 @@ const DEFAULT_STATE = {
   taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
   lastCheckinDate: null,
   cloud: { endpoint: '', token: '', lastSyncAt: null, lastError: '' },
-  manualOverrides: {}, // occurrenceId → { pinned: {dateStr: hours}, excludedDates: [] }
+  // occurrenceId -> { pinned: {dateStr: hours}, excludedDates: [], timeBlocks: {dateStr: {start,end,mode}} }
+  manualOverrides: {},
 };
 
 let S = { ...DEFAULT_STATE };
@@ -60,7 +62,7 @@ const _undoStack = [];
 ══════════════════════════════════════════ */
 const STORAGE_KEY = 'calico_v2';
 const LEGACY_STORAGE_KEY = 'calico_v1';
-const STATE_VERSION = 4;
+const STATE_VERSION = 5;
 const UNASSIGNED_PROJECT_ID = '__unassigned__';
 
 function cloneData(value) {
@@ -84,6 +86,26 @@ function workingHoursSettings(dayStart, dayEnd, maxDailyHours, minBlockHours) {
     maxDailyHours: finiteNumber(maxDailyHours, 8, 0.5, 24),
     minBlockHours: finiteNumber(minBlockHours, 0.5, 0.25, 24),
   };
+}
+
+function workingHoursForDay(dateStr, state = S) {
+  const override = state.dailyWorkingHours?.[dateStr];
+  const dayStart = override?.dayStart || state.dayStart || DEFAULT_STATE.dayStart;
+  const dayEnd = override?.dayEnd || state.dayEnd || DEFAULT_STATE.dayEnd;
+  const maxDailyHours = override?.maxDailyHours ?? state.maxDailyHours ?? DEFAULT_STATE.maxDailyHours;
+  const normalized = workingHoursSettings(dayStart, dayEnd, maxDailyHours, state.minBlockHours);
+  return normalized || workingHoursSettings(
+    DEFAULT_STATE.dayStart,
+    DEFAULT_STATE.dayEnd,
+    DEFAULT_STATE.maxDailyHours,
+    state.minBlockHours
+  );
+}
+
+function isValidTimeBlock(value) {
+  if (!value || typeof value !== 'object') return false;
+  if (!['fixed', 'preferred'].includes(value.mode)) return false;
+  return eventTimeRangeIsValid(value.start, value.end);
 }
 
 function taskHoursFromInput(value) {
@@ -134,9 +156,32 @@ function normalizeState(input) {
       next.weekdayCapacity[String(i)] = finiteNumber(next.weekdayCapacity[i], next.maxDailyHours, 0, 24);
     }
   }
+  next.dailyWorkingHours = next.dailyWorkingHours && typeof next.dailyWorkingHours === 'object'
+    ? next.dailyWorkingHours : {};
+  Object.entries(next.dailyWorkingHours).forEach(([dateStr, override]) => {
+    const normalized = workingHoursSettings(
+      override?.dayStart,
+      override?.dayEnd,
+      override?.maxDailyHours,
+      next.minBlockHours
+    );
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !normalized) {
+      delete next.dailyWorkingHours[dateStr];
+      return;
+    }
+    next.dailyWorkingHours[dateStr] = {
+      dayStart: normalized.dayStart,
+      dayEnd: normalized.dayEnd,
+      maxDailyHours: normalized.maxDailyHours,
+    };
+  });
   next.weekOffset = Math.trunc(finiteNumber(next.weekOffset, 0, -520, 520));
   next.tasks = Array.isArray(next.tasks) ? next.tasks.filter(Boolean) : [];
   next.events = Array.isArray(next.events) ? next.events.filter(Boolean) : [];
+  next.events = next.events.map(event => ({
+    ...event,
+    kind: event?.kind === 'availability' ? 'availability' : 'event',
+  }));
   next.projects = Array.isArray(next.projects) ? next.projects.filter(Boolean) : [];
   const seenProjectIds = new Set();
   next.projects = next.projects.map((project, index) => {
@@ -204,6 +249,19 @@ function normalizeState(input) {
     });
     override.excludedDates = Array.isArray(override.excludedDates)
       ? Array.from(new Set(override.excludedDates.filter(Boolean))) : [];
+    override.timeBlocks = override.timeBlocks && typeof override.timeBlocks === 'object'
+      ? override.timeBlocks : {};
+    Object.entries(override.timeBlocks).forEach(([dateStr, block]) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !isValidTimeBlock(block)) {
+        delete override.timeBlocks[dateStr];
+        return;
+      }
+      override.timeBlocks[dateStr] = {
+        start: block.start,
+        end: block.end,
+        mode: block.mode,
+      };
+    });
   });
 
   return next;
@@ -423,6 +481,12 @@ function addDays(d, n)   { const r = new Date(d); r.setDate(r.getDate()+n); retu
 function parseDate(s)    { return new Date(s + 'T00:00:00'); }
 function fmt(d)          { return d.toLocaleDateString('en-GB', {day:'numeric', month:'short'}); }
 function timeH(t)        { const [h,m]=t.split(':').map(Number); return h+m/60; }
+function formatClock(hours) {
+  const totalMinutes = Math.round(hours * 60);
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
 
 const DNAMES  = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const DFULL   = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
@@ -525,12 +589,19 @@ function buildDailyCapacity(days) {
   const events   = {}; // dateStr → [{...}]
 
   days.forEach(dStr => {
-    // Raw capacity = weekday-specific max task hours × intensityRatio,
-    // capped by the preferred working-hours window.
+    // Raw capacity = the day's configured max task hours × intensityRatio,
+    // capped by that day's working-hours window.
     const dow      = parseDate(dStr).getDay();
-    const windowH  = Math.max(0, timeH(S.dayEnd || '18:00') - timeH(S.dayStart || '09:00'));
+    const dayHours = workingHoursForDay(dStr);
+    const windowH  = Math.max(0, timeH(dayHours.dayEnd) - timeH(dayHours.dayStart));
     const weekdayBase = S.weekdayCapacity?.[String(dow)] ?? S.weekdayCapacity?.[dow];
-    const base     = Math.min(windowH || 24, finiteNumber(weekdayBase, S.maxDailyHours || 8, 0, 24));
+    const hasDayOverride = !!S.dailyWorkingHours?.[dStr];
+    const baseSetting = hasDayOverride
+      ? dayHours.maxDailyHours
+      : (weekdayBase === undefined
+        ? dayHours.maxDailyHours
+        : finiteNumber(weekdayBase, dayHours.maxDailyHours, 0, 24));
+    const base     = Math.min(windowH || 24, baseSetting);
     const ratio    = getInt(dStr) / Math.max(1, S.baseline || 7);
     // Intensity can exceed baseline (ratio > 1) to allow more capacity.
     // Overwork is task-scoped and is applied while allocating an occurrence.
@@ -783,6 +854,10 @@ function pinnedHoursForOccurrence(occ, dateStr) {
   return override?.pinned?.[dateStr];
 }
 
+function timeBlockForOccurrence(occ, dateStr) {
+  return S.manualOverrides?.[occ.occId]?.timeBlocks?.[dateStr] || null;
+}
+
 function excludedDatesForOccurrence(occ) {
   return new Set(S.manualOverrides?.[occ.occId]?.excludedDates || []);
 }
@@ -791,7 +866,8 @@ function occurrenceHasUserConstraints(occ) {
   const override = S.manualOverrides?.[occ.occId];
   return !!override && (
     Object.keys(override.pinned || {}).length > 0 ||
-    (override.excludedDates || []).length > 0
+    (override.excludedDates || []).length > 0 ||
+    Object.keys(override.timeBlocks || {}).length > 0
   );
 }
 
@@ -925,6 +1001,27 @@ function allocateOccurrenceConvergent(occ, remainingCapacity) {
       remaining -= requested;
       pinnedUnfilled += Math.max(0, requested - used);
       excludedDays.add(dStr);
+      cur = addDays(cur, 1);
+    }
+  }
+
+  // Exact-time blocks reserve only their own duration. Unlike a day-level
+  // override, they intentionally leave the rest of that date available for
+  // the occurrence's automatic allocation.
+  if (deadline >= todayDate) {
+    let cur = new Date(winStart);
+    while (cur <= deadline && remaining > ALLOC_PROGRESS_EPSILON) {
+      const dStr = ds(cur);
+      const timedBlock = timeBlockForOccurrence(occ, dStr);
+      const hasDayPin = pinnedHoursForOccurrence(occ, dStr) !== undefined;
+      const duration = timeBlockDuration(timedBlock);
+      if (!hasDayPin && timedBlock && occurrenceCanAllocateOn(occ, dStr) && duration > ALLOC_PROGRESS_EPSILON) {
+        const requested = Math.min(duration, remaining);
+        const used = consumeCapacityForOccurrence(occ, dStr, requested, remainingCapacity, extraRemaining);
+        if (used > 0.001) allocation[dStr] = (allocation[dStr] || 0) + used;
+        remaining -= requested;
+        pinnedUnfilled += Math.max(0, requested - used);
+      }
       cur = addDays(cur, 1);
     }
   }
@@ -1162,6 +1259,7 @@ function allocateSchedule() {
     baseline: S.baseline,
     maxDailyHours: S.maxDailyHours,
     weekdayCapacity: S.weekdayCapacity,
+    dailyWorkingHours: S.dailyWorkingHours,
     minBlockHours: S.minBlockHours,
     taskOverworkAllowances: S.taskOverworkAllowances,
     manualOverrides: S.manualOverrides,
@@ -1331,6 +1429,140 @@ function eventHoursOnDay(dateStr) {
 
 function tasksOnDay(dateStr) {
   return S.tasks.filter(t => taskHoursOnDay(t, dateStr) > 0);
+}
+
+function timeRangesOverlap(startA, endA, startB, endB) {
+  return startA < endB - ALLOC_PROGRESS_EPSILON && endA > startB + ALLOC_PROGRESS_EPSILON;
+}
+
+function timeBlockDuration(block) {
+  return roundHours(timeH(block?.end || '') - timeH(block?.start || ''));
+}
+
+function timeBlockIsWithinWorkingHours(dateStr, block) {
+  if (!isValidTimeBlock(block)) return false;
+  const hours = workingHoursForDay(dateStr);
+  return timeH(block.start) >= timeH(hours.dayStart) - ALLOC_PROGRESS_EPSILON
+    && timeH(block.end) <= timeH(hours.dayEnd) + ALLOC_PROGRESS_EPSILON;
+}
+
+function dayTaskOccurrences(dateStr, plan = allocateSchedule()) {
+  return (plan.occurrences || []).flatMap(occ => {
+    const hours = roundHours(plan.occurrenceAllocations?.[occ.occId]?.[dateStr] || 0);
+    const task = S.tasks.find(candidate => candidate.id === occ.taskId);
+    return hours > ALLOC_PROGRESS_EPSILON && task ? [{ occ, task, hours }] : [];
+  });
+}
+
+function firstFreeTimeSlot(duration, occupied, bounds) {
+  const sorted = occupied
+    .filter(interval => interval.end > bounds.start && interval.start < bounds.end)
+    .map(interval => ({ start: Math.max(bounds.start, interval.start), end: Math.min(bounds.end, interval.end) }))
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  let cursor = bounds.start;
+  for (const interval of sorted) {
+    if (interval.start - cursor >= duration - ALLOC_PROGRESS_EPSILON) {
+      return { start: cursor, end: roundHours(cursor + duration) };
+    }
+    cursor = Math.max(cursor, interval.end);
+  }
+  return bounds.end - cursor >= duration - ALLOC_PROGRESS_EPSILON
+    ? { start: cursor, end: roundHours(cursor + duration) }
+    : null;
+}
+
+function buildDayTimeline(dateStr, plan = allocateSchedule()) {
+  const working = workingHoursForDay(dateStr);
+  const bounds = { start: timeH(working.dayStart), end: timeH(working.dayEnd) };
+  const events = eventsOnDay(dateStr).map(event => ({
+    kind: 'event', item: event, start: timeH(event.start), end: timeH(event.end),
+  }));
+  const occupied = events.map(entry => ({ start: entry.start, end: entry.end }));
+  const tasks = dayTaskOccurrences(dateStr, plan)
+    .sort((a, b) => {
+      if (a.task.priority !== b.task.priority) return a.task.priority === 'mandatory' ? -1 : 1;
+      return a.task.name.localeCompare(b.task.name);
+    });
+  const taskBlocks = [];
+  const flexible = [];
+
+  tasks.forEach(entry => {
+    const block = timeBlockForOccurrence(entry.occ, dateStr);
+    const duration = timeBlockDuration(block);
+    if (block?.mode === 'fixed' && timeBlockIsWithinWorkingHours(dateStr, block)
+      && duration <= entry.hours + ALLOC_PROGRESS_EPSILON) {
+      const placed = {
+        kind: 'task', item: entry.task, occ: entry.occ, hours: duration,
+        start: timeH(block.start), end: timeH(block.end), mode: 'fixed', exact: true,
+      };
+      taskBlocks.push(placed);
+      occupied.push({ start: placed.start, end: placed.end });
+      const remaining = roundHours(entry.hours - duration);
+      if (remaining > ALLOC_PROGRESS_EPSILON) flexible.push({ ...entry, hours: remaining });
+      return;
+    }
+    flexible.push(entry);
+  });
+
+  // Preferred blocks reserve their requested time when it remains free. If an
+  // event or a fixed block takes that space, they fall back to flexible time.
+  const remainingFlexible = [];
+  flexible.forEach(entry => {
+    const block = timeBlockForOccurrence(entry.occ, dateStr);
+    const duration = timeBlockDuration(block);
+    const desired = block?.mode === 'preferred' && timeBlockIsWithinWorkingHours(dateStr, block)
+      && duration <= entry.hours + ALLOC_PROGRESS_EPSILON
+      ? { start: timeH(block.start), end: timeH(block.end) } : null;
+    const isFree = desired && !occupied.some(interval => timeRangesOverlap(
+      desired.start, desired.end, interval.start, interval.end
+    ));
+    if (isFree) {
+      taskBlocks.push({
+        kind: 'task', item: entry.task, occ: entry.occ, hours: duration,
+        start: desired.start, end: desired.end, mode: 'preferred', exact: true,
+      });
+      occupied.push(desired);
+      const remaining = roundHours(entry.hours - duration);
+      if (remaining > ALLOC_PROGRESS_EPSILON) remainingFlexible.push({ ...entry, hours: remaining });
+    } else {
+      remainingFlexible.push(entry);
+    }
+  });
+
+  remainingFlexible.forEach(entry => {
+    let remaining = entry.hours;
+    while (remaining > ALLOC_PROGRESS_EPSILON) {
+      const slot = firstFreeTimeSlot(remaining, occupied, bounds);
+      if (slot) {
+        const used = roundHours(slot.end - slot.start);
+        taskBlocks.push({
+          kind: 'task', item: entry.task, occ: entry.occ, hours: used,
+          start: slot.start, end: slot.end, mode: 'flexible', exact: false,
+        });
+        occupied.push(slot);
+        remaining = roundHours(remaining - used);
+        continue;
+      }
+
+      // The date-level allocator has already protected total capacity. This
+      // fallback is only for fragmented calendars where no single gap remains.
+      const anySlot = firstFreeTimeSlot(Math.min(remaining, S.minBlockHours || 0.5), occupied, bounds);
+      if (!anySlot) break;
+      const used = roundHours(anySlot.end - anySlot.start);
+      taskBlocks.push({
+        kind: 'task', item: entry.task, occ: entry.occ, hours: used,
+        start: anySlot.start, end: anySlot.end, mode: 'flexible', exact: false,
+      });
+      occupied.push(anySlot);
+      remaining = roundHours(remaining - used);
+    }
+  });
+
+  return {
+    working,
+    events: events.sort((a, b) => a.start - b.start),
+    taskBlocks: taskBlocks.sort((a, b) => a.start - b.start || a.end - b.end),
+  };
 }
 
 function dailyCapacityOn(dateStr) {
@@ -1685,6 +1917,11 @@ function renderSidebar() {
   });
 }
 
+function openAvailabilityModal() {
+  openModal('event');
+  document.getElementById('f-event-kind').value = 'availability';
+}
+
 function softConflictEntries(plan = allocateSchedule()) {
   return plan.conflictSummary?.soft || [];
 }
@@ -1765,8 +2002,9 @@ function renderWeek() {
   // Time gutter — full 24 hours
   const gutter = document.createElement('div');
   gutter.className = 'wk-time-col';
-  const startH = timeH(S.dayStart);
-  const endH   = timeH(S.dayEnd);
+  const defaultHours = workingHoursForDay(ds(days[0]));
+  const startH = timeH(defaultHours.dayStart);
+  const endH   = timeH(defaultHours.dayEnd);
   const GRID_START = 0;   // always start at midnight
   const GRID_END   = 24;  // always end at midnight
   for (let h = GRID_START; h < GRID_END; h++) {
@@ -1788,6 +2026,10 @@ function renderWeek() {
   const hoursShown = GRID_END - GRID_START; // always 24
   days.forEach((d, i) => {
     const dStr = ds(d);
+    const timeline = buildDayTimeline(dStr);
+    const dayHours = timeline.working;
+    const dayStartH = timeH(dayHours.dayStart);
+    const dayEndH = timeH(dayHours.dayEnd);
     const isT  = dStr === todayStr;
     const isWe = i >= 5;
     const col  = document.createElement('div');
@@ -1796,61 +2038,26 @@ function renderWeek() {
 
     for (let h = GRID_START; h < GRID_END; h++) {
       const line = document.createElement('div');
-      const isWorking = h >= Math.floor(startH) && h < Math.ceil(endH);
+      const isWorking = h >= Math.floor(dayStartH) && h < Math.ceil(dayEndH);
       line.className = 'wk-hr-line' + (isWorking ? ' working' : ' non-working');
       col.appendChild(line);
     }
 
-    // Events
-    eventsOnDay(dStr).forEach(ev => {
-      const block = makeWeekBlock(ev, 'event', dStr);
+    timeline.events.forEach(entry => {
+      const block = makeWeekBlock(entry.item, 'event', dStr);
       if (block) col.appendChild(block);
     });
 
-    // Build a timeline of free slots around events for this day
-    // Mandatory tasks first, then optional — placed in event-free gaps
-    const dayEvents = eventsOnDay(dStr).map(ev => ({
-      start: timeH(ev.start || '09:00'),
-      end:   timeH(ev.end   || '10:00'),
-    })).sort((a, b) => a.start - b.start);
-
-    // Free slots: gaps in [startH, endH] not covered by events
-    const freeSlots = [];
-    let cursor = startH;
-    dayEvents.forEach(ev => {
-      if (ev.start > cursor) freeSlots.push({ start: cursor, end: ev.start });
-      cursor = Math.max(cursor, ev.end);
-    });
-    if (cursor < endH) freeSlots.push({ start: cursor, end: endH });
-
-    // Sort tasks: mandatory first, then optional
-    const dayTasks = tasksOnDay(dStr)
-      .filter(isTaskVisible)
-      .map(t => ({ task: t, hrs: taskHoursOnDay(t, dStr) }))
-      .filter(x => x.hrs > 0)
-      .sort((a, b) => {
-        if (a.task.priority === b.task.priority) return 0;
-        return a.task.priority === 'mandatory' ? -1 : 1;
-      });
-
-    // Place tasks into free slots sequentially
-    let slotIdx = 0;
-    let slotCursor = freeSlots.length ? freeSlots[0].start : startH;
-
-    dayTasks.forEach(({ task: t, hrs }) => {
-      let remaining = hrs;
-      while (remaining > 0.05 && slotIdx < freeSlots.length) {
-        const slot = freeSlots[slotIdx];
-        const available = slot.end - slotCursor;
-        if (available <= 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; continue; }
-        const used   = Math.min(remaining, available);
-        const topPx  = (slotCursor - 0) * 54; // offset from midnight (GRID_START=0)
-        const block  = makeWeekBlock(t, 'task', dStr, used, topPx);
-        if (block) col.appendChild(block);
-        slotCursor += used;
-        remaining  -= used;
-        if (slotCursor >= slot.end - 0.05) { slotIdx++; slotCursor = freeSlots[slotIdx]?.start ?? endH; }
-      }
+    timeline.taskBlocks.filter(entry => isTaskVisible(entry.item)).forEach(entry => {
+      const block = makeWeekBlock(
+        entry.item,
+        'task',
+        dStr,
+        entry.hours,
+        entry.start * 54,
+        entry
+      );
+      if (block) col.appendChild(block);
     });
 
     body.appendChild(col);
@@ -1871,7 +2078,7 @@ function renderWeek() {
   });
 }
 
-function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
+function makeWeekBlock(item, type, sourceDs, hours, stackTop, placement) {
   const block = document.createElement('div');
   const completion = type === 'task' ? taskCompletionState(item, sourceDs) : null;
   block.className = `wk-block${item.priority==='optional'?' optional':''}`;
@@ -1886,16 +2093,17 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     const dur = Math.max(eh - sh, 0.25);
     block.style.top    = ((sh - 0) * 54) + 'px'; // 0 = GRID_START (midnight)
     block.style.height = (dur * 54) + 'px';
+    const label = item.kind === 'availability' ? 'Availability' : 'Event';
     block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>
-      <div class="wk-block-sub">${item.start}–${item.end}</div>`;
+      <div class="wk-block-sub">${label} · ${item.start}–${item.end}</div>`;
   } else {
     block.style.top    = stackTop + 'px';
     block.style.height = (hours * 54) + 'px';
-    const isFixed = hasManualOverrideForTaskDate(item.id, sourceDs);
+    const isFixed = placement?.mode === 'fixed' || hasManualOverrideForTaskDate(item.id, sourceDs);
     block.classList.toggle('user-fixed', isFixed);
     block.classList.toggle('completed', completion.done);
     block.innerHTML = `<div class="wk-block-title">${escapeHtml(item.name)}</div>
-      <div class="wk-block-sub">${Math.round(hours*10)/10}h · ${isFixed ? 'fixed by you' : 'flexible'}</div>`;
+      <div class="wk-block-sub">${Math.round(hours*10)/10}h · ${placement?.mode === 'preferred' ? 'preferred time' : (isFixed ? 'fixed time' : 'flexible')}</div>`;
   }
 
   if (type === 'task') {
@@ -1903,6 +2111,7 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
     block.draggable = true;
     block.dataset.taskId   = item.id;
     block.dataset.sourceDs = sourceDs;
+    block.dataset.occId    = placement?.occ?.occId || '';
     // A rendered day may contain several visual chunks around events. Moving
     // any chunk moves the occurrence's full allocation for that day.
     block.dataset.hrs      = taskHoursOnDay(item, sourceDs);
@@ -1915,15 +2124,20 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
       <button type="button" class="wk-block-action${completion.done ? ' active' : ''}"
         aria-label="${completion.actionLabel}" title="${completion.actionLabel}">${completion.done ? '✓' : '○'}</button>
       <button type="button" class="wk-block-action" title="Adjust hours for this day">±</button>
+      <button type="button" class="wk-block-action" title="Set a preferred or fixed time">◷</button>
       <button type="button" class="wk-block-action" title="Skip and reallocate">→</button>`;
-    const [doneBtn, adjustBtn, skipBtn] = actions.querySelectorAll('button');
+    const [doneBtn, adjustBtn, timeBtn, skipBtn] = actions.querySelectorAll('button');
     doneBtn.addEventListener('click', e => {
       e.stopPropagation();
       toggleTaskLog(item, sourceDs, taskHoursOnDay(item, sourceDs));
     });
     adjustBtn.addEventListener('click', e => {
       e.stopPropagation();
-      openDayHoursEditor(item.id, sourceDs);
+      openDayHoursEditor(item.id, sourceDs, placement?.occ?.occId);
+    });
+    timeBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      openTimeBlockEditor(item.id, sourceDs, placement?.occ?.occId);
     });
     skipBtn.addEventListener('click', e => {
       e.stopPropagation();
@@ -1938,12 +2152,19 @@ function makeWeekBlock(item, type, sourceDs, hours, stackTop) {
 
 
 function dayScheduleItems(dateStr) {
-  const events = eventsOnDay(dateStr).map(ev => ({
-    kind: 'event', id: ev.id, item: ev, start: timeH(ev.start || S.dayStart), label: `${ev.start || ''}–${ev.end || ''}`,
+  const timeline = buildDayTimeline(dateStr);
+  const events = timeline.events.map(entry => ({
+    ...entry,
+    id: entry.item.id,
+    label: `${entry.item.start}–${entry.item.end}`,
   }));
-  const tasks = tasksOnDay(dateStr)
-    .filter(isTaskVisible)
-    .map(task => ({ kind: 'task', id: task.id, item: task, start: timeH(S.dayStart || '09:00'), hours: taskHoursOnDay(task, dateStr), label: `${taskHoursOnDay(task, dateStr)}h planned` }));
+  const tasks = timeline.taskBlocks
+    .filter(entry => isTaskVisible(entry.item))
+    .map(entry => ({
+      ...entry,
+      id: entry.item.id,
+      label: `${entry.hours}h planned`,
+    }));
   return [...events, ...tasks].sort((a, b) => (a.start - b.start) || (a.kind === 'event' ? -1 : 1));
 }
 
@@ -1965,6 +2186,7 @@ function renderDay() {
           <h2>${escapeHtml(date.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' }))}</h2>
         </div>
         <div class="day-nav-actions">
+          <button class="btn-ghost" onclick="openDayWorkingHoursEditor('${dateStr}')">Working hours</button>
           <button class="btn-ghost" onclick="shiftWeek(-1)">← Previous</button>
           <button class="btn-ghost" onclick="goToday()">Today</button>
           <button class="btn-ghost" onclick="shiftWeek(1)">Next →</button>
@@ -1989,16 +2211,19 @@ function renderDay() {
     row.style.setProperty('--item-color', color);
     if (entry.kind === 'event') {
       const rl = repeatLabel(entry.item);
-      row.innerHTML = `<div class="day-time">${escapeHtml(entry.label)}</div><div class="day-card"><div class="day-kind">Fixed event${rl ? ' · ' + escapeHtml(rl) : ''}</div><div class="day-title">${escapeHtml(entry.item.name)}</div></div>`;
+      const kind = entry.item.kind === 'availability' ? 'Availability block' : 'Fixed event';
+      row.innerHTML = `<div class="day-time">${escapeHtml(entry.label)}</div><div class="day-card"><div class="day-kind">${kind}${rl ? ' · ' + escapeHtml(rl) : ''}</div><div class="day-title">${escapeHtml(entry.item.name)}</div></div>`;
       row.onclick = () => openModal('event', entry.item.id);
     } else {
       const completion = taskCompletionState(entry.item, dateStr);
-      const fixed = hasManualOverrideForTaskDate(entry.item.id, dateStr);
+      const fixed = entry.mode === 'fixed';
+      const timeLabel = `${formatClock(entry.start)}–${formatClock(entry.end)}`;
       row.classList.toggle('completed', completion.done);
-      row.innerHTML = `<div class="day-time">${roundHours(entry.hours)}h</div><div class="day-card"><div class="day-card-copy"><div class="day-kind">${prioritySymbolMarkup(entry.item.priority)} Calico work block · ${fixed ? 'fixed by you' : 'flexible'}</div><div class="day-title">${escapeHtml(entry.item.name)}</div></div><div class="day-actions" aria-label="Task actions"><button type="button" data-action="done">${completion.done ? 'Undo done' : 'Done'}</button><button type="button" data-action="partial">Partial</button><button type="button" data-action="adjust">Adjust</button></div></div>`;
+      row.innerHTML = `<div class="day-time">${timeLabel}<br><span>${roundHours(entry.hours)}h</span></div><div class="day-card"><div class="day-card-copy"><div class="day-kind">${prioritySymbolMarkup(entry.item.priority)} Calico work block · ${fixed ? 'fixed time' : (entry.mode === 'preferred' ? 'preferred time' : 'flexible')}</div><div class="day-title">${escapeHtml(entry.item.name)}</div></div><div class="day-actions" aria-label="Task actions"><button type="button" data-action="done">${completion.done ? 'Undo done' : 'Done'}</button><button type="button" data-action="partial">Partial</button><button type="button" data-action="adjust">Adjust</button><button type="button" data-action="time">Time</button></div></div>`;
       row.querySelector('[data-action="done"]').onclick = e => { e.stopPropagation(); toggleTaskLog(entry.item, dateStr, entry.hours); };
       row.querySelector('[data-action="partial"]').onclick = e => { e.stopPropagation(); openTaskPartialEditor(entry.item, dateStr, entry.hours); };
-      row.querySelector('[data-action="adjust"]').onclick = e => { e.stopPropagation(); openDayHoursEditor(entry.item.id, dateStr); };
+      row.querySelector('[data-action="adjust"]').onclick = e => { e.stopPropagation(); openDayHoursEditor(entry.item.id, dateStr, entry.occ?.occId); };
+      row.querySelector('[data-action="time"]').onclick = e => { e.stopPropagation(); openTimeBlockEditor(entry.item.id, dateStr, entry.occ?.occId); };
       row.onclick = () => openTaskDetails(entry.item.id);
     }
     list.appendChild(row);
@@ -2996,11 +3221,75 @@ function saveWorkingHours() {
   showToast('Working hours saved');
 }
 
+let _dayWorkingHoursDate = null;
+
+function openDayWorkingHoursEditor(dateStr) {
+  const hours = workingHoursForDay(dateStr);
+  _dayWorkingHoursDate = dateStr;
+  document.getElementById('day-working-hours-title').textContent = parseDate(dateStr)
+    .toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  document.getElementById('day-working-hours-start').value = hours.dayStart;
+  document.getElementById('day-working-hours-end').value = hours.dayEnd;
+  document.getElementById('day-working-hours-max').value = hours.maxDailyHours;
+  document.getElementById('day-working-hours-auto').classList.toggle('hidden', !S.dailyWorkingHours?.[dateStr]);
+  document.getElementById('day-working-hours-note').textContent = S.dailyWorkingHours?.[dateStr]
+    ? 'This date has its own availability setting.'
+    : 'This date currently uses your default working hours.';
+  document.getElementById('day-working-hours-bg').classList.remove('hidden');
+}
+
+function closeDayWorkingHoursEditor() {
+  document.getElementById('day-working-hours-bg').classList.add('hidden');
+  _dayWorkingHoursDate = null;
+}
+
+function saveDayWorkingHours() {
+  if (!_dayWorkingHoursDate) return;
+  const settings = workingHoursSettings(
+    document.getElementById('day-working-hours-start').value,
+    document.getElementById('day-working-hours-end').value,
+    document.getElementById('day-working-hours-max').value,
+    S.minBlockHours
+  );
+  if (!settings) {
+    showToast('Day end must be later than day start.');
+    return;
+  }
+  const previous = cloneData(S.dailyWorkingHours || {});
+  S.dailyWorkingHours ||= {};
+  S.dailyWorkingHours[_dayWorkingHoursDate] = {
+    dayStart: settings.dayStart,
+    dayEnd: settings.dayEnd,
+    maxDailyHours: settings.maxDailyHours,
+  };
+  snapshotForUndo('adjust daily working hours', { ...S, dailyWorkingHours: previous });
+  invalidatePlan();
+  save();
+  render();
+  closeDayWorkingHoursEditor();
+  revalidateExistingTasks(true);
+  showToast('Working hours updated for this day');
+}
+
+function returnDayWorkingHoursToDefault() {
+  if (!_dayWorkingHoursDate || !S.dailyWorkingHours?.[_dayWorkingHoursDate]) return;
+  const previous = cloneData(S.dailyWorkingHours);
+  delete S.dailyWorkingHours[_dayWorkingHoursDate];
+  snapshotForUndo('return daily working hours to default', { ...S, dailyWorkingHours: previous });
+  invalidatePlan();
+  save();
+  render();
+  closeDayWorkingHoursEditor();
+  revalidateExistingTasks(true);
+  showToast('This day uses default working hours again');
+}
+
 function resetData() {
   if (!confirm('Clear all tasks, events and intensity data? You can undo this until the page closes.')) return;
   snapshotForUndo('clear all data');
   S.tasks = []; S.events = []; S.projects = []; S.hiddenProjectIds = [];
   S.intensities = {}; S.intensityHistory = [];
+  S.dailyWorkingHours = {};
   S.taskLog = {}; S.manualOverrides = {}; S.taskOverworkAllowances = {};
   invalidatePlan();
   save(); render();
@@ -3228,6 +3517,7 @@ function openModal(type, id) {
           }
         }
       } else {
+        document.getElementById('f-event-kind').value = item.kind === 'availability' ? 'availability' : 'event';
         document.getElementById('f-date').value    = item.date  || todayVal;
         document.getElementById('f-start').value  = item.start || '09:00';
         document.getElementById('f-end').value    = item.end   || '10:00';
@@ -3260,6 +3550,7 @@ function openModal(type, id) {
     document.getElementById('f-description').value   = '';
     document.getElementById('f-start').value          = '09:00';
     document.getElementById('f-end').value            = '10:00';
+    document.getElementById('f-event-kind').value     = 'event';
     document.getElementById('f-repeat').value         = 'none';
     document.getElementById('f-task-repeat').value    = 'none';
     document.getElementById('f-task-start-date').value = ds(today());
@@ -3367,7 +3658,7 @@ function saveItem() {
     }
     const obj = {
       id: editingId || uid(),
-      type: 'event', name, priority, color,
+      type: 'event', kind: document.getElementById('f-event-kind').value === 'availability' ? 'availability' : 'event', name, priority, color,
       date:  document.getElementById('f-date').value,
       start,
       end,
@@ -3472,6 +3763,8 @@ document.addEventListener('click', function(e) {
   if (e.target.id === 'conflict-bg') closeConflict();
   if (e.target.id === 'review-bg') closeReviewPanel();
   if (e.target.id === 'day-hours-bg') closeDayHoursEditor();
+  if (e.target.id === 'day-working-hours-bg') closeDayWorkingHoursEditor();
+  if (e.target.id === 'time-block-bg') closeTimeBlockEditor();
   if (e.target.id === 'task-detail-bg') closeTaskDetails();
   if (!e.target.closest('.quick-search')) closeSearchResults();
 });
@@ -3539,7 +3832,7 @@ function isTypingTarget(target) {
 
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
-    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor(); closeTaskDetails(); closeSearchResults();
+    closeModal(); closeConflict(); closeReviewPanel(); closeDayHoursEditor(); closeDayWorkingHoursEditor(); closeTimeBlockEditor(); closeTaskDetails(); closeSearchResults();
     document.getElementById('checkin-bg')?.classList.add('hidden');
     return;
   }
@@ -3728,18 +4021,20 @@ function hasManualOverrideForTaskDate(taskId, dateStr, plan = allocateSchedule()
   const override = S.manualOverrides?.[occ.occId];
   return !!override && (
     Object.prototype.hasOwnProperty.call(override.pinned || {}, dateStr) ||
-    (override.excludedDates || []).includes(dateStr)
+    (override.excludedDates || []).includes(dateStr) ||
+    Object.prototype.hasOwnProperty.call(override.timeBlocks || {}, dateStr)
   );
 }
 
 function ensureManualOverride(occId) {
   if (!S.manualOverrides) S.manualOverrides = {};
   if (!S.manualOverrides[occId]) {
-    S.manualOverrides[occId] = { pinned: {}, excludedDates: [] };
+    S.manualOverrides[occId] = { pinned: {}, excludedDates: [], timeBlocks: {} };
   }
   const override = S.manualOverrides[occId];
   override.pinned ||= {};
   override.excludedDates = Array.isArray(override.excludedDates) ? override.excludedDates : [];
+  override.timeBlocks = override.timeBlocks && typeof override.timeBlocks === 'object' ? override.timeBlocks : {};
   return override;
 }
 
@@ -3748,7 +4043,8 @@ function cleanupManualOverride(occId) {
   if (!override) return;
   override.pinned ||= {};
   override.excludedDates = Array.isArray(override.excludedDates) ? override.excludedDates : [];
-  if (!Object.keys(override.pinned).length && !override.excludedDates.length) {
+  override.timeBlocks = override.timeBlocks && typeof override.timeBlocks === 'object' ? override.timeBlocks : {};
+  if (!Object.keys(override.pinned).length && !override.excludedDates.length && !Object.keys(override.timeBlocks).length) {
     delete S.manualOverrides[occId];
   }
 }
@@ -3769,6 +4065,7 @@ function constrainedDatesForOccurrence(occ) {
   return Array.from(new Set([
     ...Object.keys(override.pinned || {}),
     ...(override.excludedDates || []),
+    ...Object.keys(override.timeBlocks || {}),
   ])).sort();
 }
 
@@ -3782,6 +4079,7 @@ function setDayConstraint(occ, dateStr, hours) {
   } else {
     override.pinned[dateStr] = value;
   }
+  delete override.timeBlocks[dateStr];
 }
 
 function releaseDayConstraint(occ, dateStr) {
@@ -3789,6 +4087,7 @@ function releaseDayConstraint(occ, dateStr) {
   if (!override) return;
   delete override.pinned?.[dateStr];
   override.excludedDates = (override.excludedDates || []).filter(date => date !== dateStr);
+  delete override.timeBlocks?.[dateStr];
   cleanupManualOverride(occ.occId);
 }
 
@@ -4192,6 +4491,154 @@ function returnOccurrenceToAuto() {
   } else {
     showOverloadToast(`${occ.name}: ${result.shortfall}h still cannot fit before the deadline.`);
   }
+}
+
+let _timeBlockOccId = null;
+let _timeBlockDate = null;
+let _timeBlockTaskId = null;
+
+function fixedTimeBlockCollision(occ, dateStr, block) {
+  const start = timeH(block.start);
+  const end = timeH(block.end);
+  const event = eventsOnDay(dateStr).find(candidate => timeRangesOverlap(
+    start, end, timeH(candidate.start), timeH(candidate.end)
+  ));
+  if (event) return `It overlaps ${event.kind === 'availability' ? 'availability' : 'an event'}: ${event.name}.`;
+
+  for (const [occId, override] of Object.entries(S.manualOverrides || {})) {
+    if (occId === occ.occId) continue;
+    const other = override?.timeBlocks?.[dateStr];
+    if (other?.mode !== 'fixed' || !isValidTimeBlock(other)) continue;
+    if (timeRangesOverlap(start, end, timeH(other.start), timeH(other.end))) {
+      return 'It overlaps another fixed task block.';
+    }
+  }
+  return '';
+}
+
+function timeBlockDraft() {
+  return {
+    start: document.getElementById('time-block-start').value,
+    end: document.getElementById('time-block-end').value,
+    mode: document.getElementById('time-block-mode').value,
+  };
+}
+
+function openTimeBlockEditor(taskId, dateStr, occurrenceId) {
+  const plan = allocateSchedule();
+  const occ = (plan.occurrences || []).find(candidate => candidate.occId === occurrenceId)
+    || occurrenceForTaskDate(taskId, dateStr, plan);
+  if (!occ) {
+    showToast('That task occurrence could not be found');
+    return;
+  }
+  const task = S.tasks.find(candidate => candidate.id === taskId);
+  const existing = timeBlockForOccurrence(occ, dateStr);
+  const automatic = buildDayTimeline(dateStr, plan).taskBlocks.find(block => (
+    block.occ.occId === occ.occId && block.item.id === taskId
+  ));
+  const working = workingHoursForDay(dateStr);
+  const scheduled = plan.occurrenceAllocations?.[occ.occId]?.[dateStr] || 0;
+  const fallbackStart = automatic?.start ?? timeH(working.dayStart);
+  const fallbackEnd = automatic?.end ?? Math.min(timeH(working.dayEnd), fallbackStart + scheduled);
+
+  _timeBlockOccId = occ.occId;
+  _timeBlockDate = dateStr;
+  _timeBlockTaskId = taskId;
+  document.getElementById('time-block-title').textContent = task?.name || occ.name || 'Set task time';
+  document.getElementById('time-block-date').textContent = parseDate(dateStr)
+    .toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  document.getElementById('time-block-mode').value = existing?.mode || 'preferred';
+  document.getElementById('time-block-start').value = existing?.start || formatClock(fallbackStart);
+  document.getElementById('time-block-end').value = existing?.end || formatClock(fallbackEnd);
+  document.getElementById('time-block-auto').classList.toggle('hidden', !existing);
+  document.getElementById('time-block-bg').classList.remove('hidden');
+  previewTimeBlock();
+}
+
+function closeTimeBlockEditor() {
+  document.getElementById('time-block-bg').classList.add('hidden');
+  _timeBlockOccId = null;
+  _timeBlockDate = null;
+  _timeBlockTaskId = null;
+}
+
+function previewTimeBlock() {
+  const note = document.getElementById('time-block-note');
+  const plan = allocateSchedule();
+  const occ = (plan.occurrences || []).find(candidate => candidate.occId === _timeBlockOccId);
+  const block = timeBlockDraft();
+  note.classList.remove('bad');
+  if (!occ || !eventTimeRangeIsValid(block.start, block.end)) {
+    note.textContent = 'End time must be later than start time.';
+    note.classList.add('bad');
+    return false;
+  }
+  if (!timeBlockIsWithinWorkingHours(_timeBlockDate, block)) {
+    const working = workingHoursForDay(_timeBlockDate);
+    note.textContent = `Choose a time within ${working.dayStart}–${working.dayEnd}.`;
+    note.classList.add('bad');
+    return false;
+  }
+  const duration = timeBlockDuration(block);
+  const max = maxConstraintHoursForDate(occ, _timeBlockDate);
+  if (duration > max + ALLOC_EPSILON) {
+    note.textContent = `At most ${max}h can be fixed here because other fixed days already account for the rest.`;
+    note.classList.add('bad');
+    return false;
+  }
+  if (block.mode === 'fixed') {
+    const collision = fixedTimeBlockCollision(occ, _timeBlockDate, block);
+    if (collision) {
+      note.textContent = collision;
+      note.classList.add('bad');
+      return false;
+    }
+    note.textContent = `${duration}h will remain at this exact time and Calico will schedule around it.`;
+  } else {
+    note.textContent = `${duration}h will stay on this day; Calico will use this time when it remains available.`;
+  }
+  return true;
+}
+
+function saveTimeBlock() {
+  const plan = allocateSchedule();
+  const occ = (plan.occurrences || []).find(candidate => candidate.occId === _timeBlockOccId);
+  if (!occ || !previewTimeBlock()) return;
+  const block = timeBlockDraft();
+  const duration = timeBlockDuration(block);
+  const previous = cloneData(S.manualOverrides || {});
+  const override = ensureManualOverride(occ.occId);
+  override.timeBlocks[_timeBlockDate] = {
+    ...block,
+  };
+  invalidatePlan();
+  const result = manualConstraintResult(occ);
+  snapshotForUndo('set task block time', { ...S, manualOverrides: previous });
+  save();
+  render();
+  closeTimeBlockEditor();
+  if (result.fullyAllocated) {
+    showToast(block.mode === 'fixed' ? 'Task time fixed' : 'Task time preference saved');
+  } else {
+    showOverloadToast(`${occ.name}: ${result.shortfall}h cannot fit with this time constraint.`);
+  }
+}
+
+function returnTimeBlockToAuto() {
+  const plan = allocateSchedule();
+  const occ = (plan.occurrences || []).find(candidate => candidate.occId === _timeBlockOccId);
+  const existing = occ && timeBlockForOccurrence(occ, _timeBlockDate);
+  if (!occ || !existing) return;
+  const previous = cloneData(S.manualOverrides || {});
+  delete S.manualOverrides[occ.occId].timeBlocks[_timeBlockDate];
+  cleanupManualOverride(occ.occId);
+  invalidatePlan();
+  snapshotForUndo('return task block to automatic timing', { ...S, manualOverrides: previous });
+  save();
+  render();
+  closeTimeBlockEditor();
+  showToast('Task block is flexible again');
 }
 
 /* ══════════════════════════════════════════

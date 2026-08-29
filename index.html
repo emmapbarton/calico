@@ -72,6 +72,7 @@
       <div class="sb-section-label" style="margin-top:1.25rem">Events</div>
       <div id="sb-events"></div>
       <button class="ghost-btn" onclick="openModal('event')">+ Add event</button>
+      <button class="ghost-btn" onclick="openAvailabilityModal()">+ Add availability</button>
     </div>
     <div class="sidebar-bottom">
       <div class="sb-section-label">Baseline intensity</div>
@@ -304,6 +305,13 @@
         </div>
       </div>
       <div id="event-fields" class="hidden">
+        <div class="field-group">
+          <label>Blocks time as</label>
+          <select id="f-event-kind">
+            <option value="event">Calendar event</option>
+            <option value="availability">Availability block</option>
+          </select>
+        </div>
         <div class="field-row">
           <div class="field-group"><label>Start date</label><input type="date" id="f-date"></div>
           <div class="field-group"><label>Start time</label><input type="time" id="f-start" value="09:00"></div>
@@ -448,6 +456,64 @@
       <button id="day-hours-auto" class="btn-ghost" onclick="returnDayToAuto()">Use automatic hours</button>
       <button id="day-hours-all-auto" class="btn-ghost" onclick="returnOccurrenceToAuto()">Release all fixed days</button>
       <button id="day-hours-save" class="btn-primary" onclick="saveHoursEditor()">Save adjustment</button>
+    </div>
+  </div>
+</div>
+
+<!-- DAY WORKING HOURS EDITOR -->
+<div id="day-working-hours-bg" class="modal-bg hidden">
+  <div class="modal day-hours-modal" onclick="event.stopPropagation()">
+    <div class="modal-head">
+      <div>
+        <div class="day-hours-eyebrow">Day availability</div>
+        <div class="modal-title" id="day-working-hours-title">Working hours</div>
+      </div>
+      <button class="modal-x" onclick="closeDayWorkingHoursEditor()" aria-label="Close working hours editor">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="settings-sub">Set the actual hours Calico can use on this date. Events and availability blocks are then removed from that window.</p>
+      <div class="field-row">
+        <div class="field-group"><label>Starts</label><input type="time" id="day-working-hours-start"></div>
+        <div class="field-group"><label>Ends</label><input type="time" id="day-working-hours-end"></div>
+        <div class="field-group"><label>Max task hours</label><input type="number" id="day-working-hours-max" min="0.5" max="24" step="0.5"></div>
+      </div>
+      <div id="day-working-hours-note" class="day-hours-note"></div>
+    </div>
+    <div class="modal-foot day-hours-foot">
+      <button id="day-working-hours-auto" class="btn-ghost" onclick="returnDayWorkingHoursToDefault()">Use default hours</button>
+      <button class="btn-primary" onclick="saveDayWorkingHours()">Save hours</button>
+    </div>
+  </div>
+</div>
+
+<!-- TASK TIME BLOCK EDITOR -->
+<div id="time-block-bg" class="modal-bg hidden">
+  <div class="modal day-hours-modal" onclick="event.stopPropagation()">
+    <div class="modal-head">
+      <div>
+        <div class="day-hours-eyebrow">Task block timing</div>
+        <div class="modal-title" id="time-block-title">Set time</div>
+      </div>
+      <button class="modal-x" onclick="closeTimeBlockEditor()" aria-label="Close task time editor">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="day-hours-date" id="time-block-date"></div>
+      <div class="field-group">
+        <label>Scheduling rule</label>
+        <select id="time-block-mode" onchange="previewTimeBlock()">
+          <option value="preferred">Prefer this time</option>
+          <option value="fixed">Keep this time fixed</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <div class="field-group"><label>Starts</label><input type="time" id="time-block-start" oninput="previewTimeBlock()"></div>
+        <div class="field-group"><label>Ends</label><input type="time" id="time-block-end" oninput="previewTimeBlock()"></div>
+      </div>
+      <div id="time-block-note" class="day-hours-note"></div>
+    </div>
+    <div class="modal-foot day-hours-foot">
+      <button id="time-block-auto" class="btn-ghost" onclick="returnTimeBlockToAuto()">Use flexible timing</button>
+      <button class="btn-primary" onclick="saveTimeBlock()">Save time</button>
     </div>
   </div>
 </div>

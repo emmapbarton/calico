@@ -326,7 +326,7 @@ test('week task blocks render completion controls without a scope error', () => 
   const actionsStub = {
     className: '',
     innerHTML: '',
-    querySelectorAll() { return [buttonStub, buttonStub, buttonStub]; },
+    querySelectorAll() { return [buttonStub, buttonStub, buttonStub, buttonStub]; },
   };
   document.createElement = tag => tag === 'div' && !blockStub.className ? blockStub : actionsStub;
   try {
@@ -871,6 +871,69 @@ test('v0.1 working-hours window caps daily capacity', () => {
   const plan = allocateSchedule();
   assert.equal(plan.dailyCapacity[ds(today())], 3);
   assert.equal(total(plan, 'window-cap'), 3);
+});
+
+test('v0.2 daily working-hours override takes precedence over weekday defaults', () => {
+  const date = ds(today());
+  resetState({
+    maxDailyHours: 8,
+    weekdayCapacity: { [String(today().getDay())]: 7 },
+    dailyWorkingHours: { [date]: { dayStart: '10:00', dayEnd: '14:00', maxDailyHours: 3 } },
+    tasks: [makeTask('daily-hours', 6, 0)],
+  });
+  const plan = allocateSchedule();
+  assert.deepEqual(workingHoursForDay(date), {
+    dayStart: '10:00', dayEnd: '14:00', maxDailyHours: 3, minBlockHours: 0.5,
+  });
+  assert.equal(plan.dailyCapacity[date], 3);
+  assert.equal(total(plan, 'daily-hours'), 3);
+});
+
+test('v0.2 fixed task time is preserved and automatic work avoids it', () => {
+  const date = ds(today());
+  const task = makeTask('fixed-time', 3, 0);
+  resetState({
+    tasks: [task],
+    manualOverrides: {
+      [task.id]: {
+        pinned: {},
+        excludedDates: [],
+        timeBlocks: { [date]: { start: '14:00', end: '16:00', mode: 'fixed' } },
+      },
+    },
+  });
+  const timeline = buildDayTimeline(date);
+  const fixed = timeline.taskBlocks.find(block => block.mode === 'fixed');
+  const automatic = timeline.taskBlocks.find(block => block.mode === 'flexible');
+  assert.deepEqual(
+    { start: fixed.start, end: fixed.end, hours: fixed.hours },
+    { start: 14, end: 16, hours: 2 }
+  );
+  assert.ok(automatic.end <= fixed.start || automatic.start >= fixed.end);
+});
+
+test('v0.2 preferred task time yields to a recurring availability block', () => {
+  const date = ds(today());
+  const task = makeTask('preferred-time', 2, 0);
+  resetState({
+    tasks: [task],
+    events: [{
+      id: 'standup', type: 'event', kind: 'availability', name: 'Daily standup', date,
+      start: '10:00', end: '12:00', repeat: 'daily', color: '#111111',
+    }],
+    manualOverrides: {
+      [task.id]: {
+        pinned: {},
+        excludedDates: [],
+        timeBlocks: { [date]: { start: '10:00', end: '12:00', mode: 'preferred' } },
+      },
+    },
+  });
+  const timeline = buildDayTimeline(date);
+  const blocks = timeline.taskBlocks.filter(block => block.item.id === task.id);
+  assert.ok(blocks.length > 0);
+  assert.ok(blocks.every(block => block.end <= 10 || block.start >= 12));
+  assert.ok(blocks.every(block => block.mode === 'flexible'));
 });
 
 test('v0.1 minimum preferred block duration avoids too-small days', () => {

@@ -153,6 +153,43 @@ test('task form, details and day actions use the tightened interaction model', a
   await expect(page.locator('.day-item.task.completed', { hasText: 'Details flow task' })).toBeVisible();
 });
 
+test('daily availability, recurring availability blocks and fixed task times persist', async ({ page }) => {
+  await onboard(page);
+  await addTask(page, 'Timed focus block', '2', dateString());
+  await page.getByRole('button', { name: /^day$/i }).first().click();
+
+  const taskRow = page.locator('.day-item.task', { hasText: 'Timed focus block' });
+  await taskRow.getByRole('button', { name: /^time$/i }).click();
+  await page.locator('#time-block-mode').selectOption('fixed');
+  await page.locator('#time-block-start').fill('14:00');
+  await page.locator('#time-block-end').fill('16:00');
+  await page.getByRole('button', { name: /save time/i }).click();
+  await expect(page.locator('#time-block-bg')).toBeHidden();
+  await expect(taskRow).toContainText('fixed time');
+
+  await page.getByRole('button', { name: /working hours/i }).click();
+  await page.locator('#day-working-hours-start').fill('10:00');
+  await page.locator('#day-working-hours-end').fill('17:00');
+  await page.locator('#day-working-hours-max').fill('4');
+  await page.getByRole('button', { name: /save hours/i }).click();
+  await expect(page.locator('#day-working-hours-bg')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => S.dailyWorkingHours[Object.keys(S.dailyWorkingHours)[0]])).toEqual({
+    dayStart: '10:00', dayEnd: '17:00', maxDailyHours: 4,
+  });
+
+  await openAddModal(page, 'event');
+  await page.locator('#f-name').fill('School run');
+  await page.locator('#f-event-kind').selectOption('availability');
+  await page.locator('#f-date').fill(dateString());
+  await page.locator('#f-start').fill('10:00');
+  await page.locator('#f-end').fill('11:00');
+  await page.locator('#f-repeat').selectOption('weekdays');
+  await page.getByRole('button', { name: /^save$/i }).click();
+  await expect(page.locator('.day-item.event', { hasText: 'School run' })).toContainText('Availability block');
+  await page.reload();
+  await expect(page.locator('.day-item.task', { hasText: 'Timed focus block' })).toContainText('fixed time');
+});
+
 test('release gate guards invalid inputs, conflict reductions and backup credentials', async ({ page }) => {
   await onboard(page);
   await page.getByRole('button', { name: /settings/i }).first().click();

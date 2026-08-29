@@ -1,3 +1,4 @@
 calico-alpha-*.png
 node_modules/
 test-results/
+.codex/

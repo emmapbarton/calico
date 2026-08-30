@@ -169,17 +169,22 @@
           <button class="btn-danger" onclick="resetData()">Clear all data</button>
         </div>
         <div class="settings-card">
-          <h2 class="settings-heading">ACCOUNT &amp; CLOUD SYNC</h2>
-          <p class="settings-sub">Optional v0.1 cloud persistence. Configure a small HTTPS state API that stores one JSON state document per user.</p>
-          <div class="field-row">
-            <div class="field-group"><label>API endpoint</label><input type="url" id="settings-cloud-endpoint" placeholder="https://api.example.com/calico"></div>
-            <div class="field-group"><label>Access token</label><input type="password" id="settings-cloud-token" placeholder="Paste account token"></div>
+          <h2 class="settings-heading">ACCOUNT &amp; SYNC</h2>
+          <p class="settings-sub">Sign in by email to keep your schedule private and available across your devices.</p>
+          <div id="account-signed-out">
+            <div class="field-group"><label>Email address</label><input type="email" id="account-email" autocomplete="email" placeholder="you@example.com" onkeydown="if(event.key==='Enter')sendMagicLink()"></div>
+            <div class="settings-actions">
+              <button class="btn-primary" type="button" onclick="sendMagicLink()">Email me a sign-in link</button>
+            </div>
           </div>
-          <div class="settings-actions">
-            <button class="btn-primary" onclick="saveCloudSettings()">Save cloud settings</button>
-            <button class="btn-ghost" onclick="syncCloudNow()">Sync now</button>
+          <div id="account-signed-in" class="hidden">
+            <p class="settings-sub">Signed in as <strong id="account-email-display"></strong></p>
+            <div class="settings-actions">
+              <button class="btn-primary" type="button" onclick="syncAccountNow()">Sync now</button>
+              <button class="btn-ghost" type="button" onclick="signOutAccount()">Sign out</button>
+            </div>
           </div>
-          <p class="settings-sub" id="settings-cloud-status" style="font-size:12px"></p>
+          <p class="settings-sub" id="account-sync-status" style="font-size:12px"></p>
         </div>
         <div class="settings-card">
           <h2 class="settings-heading">BACKUP &amp; RESTORE</h2>
@@ -749,6 +754,8 @@
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.112.4/dist/umd/supabase.js"></script>
+<script src="supabase-config.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

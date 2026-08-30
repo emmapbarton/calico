@@ -9,6 +9,56 @@ async function onboard(page) {
   await expect(page.locator('#app')).toBeVisible();
 }
 
+async function mockSupabase(page, { session = null, remoteSchedule = null } = {}) {
+  await page.route('https://cdn.jsdelivr.net/**', route => route.abort());
+  await page.addInitScript(({ initialSession, initialRemoteSchedule }) => {
+    window.__calicoSupabaseMock = {
+      session: initialSession,
+      remoteSchedule: initialRemoteSchedule,
+      callbacks: [],
+      magicLinkEmails: [],
+      rpcCalls: [],
+      emit(event, nextSession) {
+        this.session = nextSession;
+        this.callbacks.forEach(callback => callback(event, nextSession));
+      },
+    };
+    window.supabase = {
+      createClient() {
+        return {
+          auth: {
+            onAuthStateChange(callback) {
+              window.__calicoSupabaseMock.callbacks.push(callback);
+              return { data: { subscription: { unsubscribe() {} } } };
+            },
+            async getSession() {
+              return { data: { session: window.__calicoSupabaseMock.session }, error: null };
+            },
+            async signInWithOtp({ email }) {
+              window.__calicoSupabaseMock.magicLinkEmails.push(email);
+              return { error: null };
+            },
+            async signOut() {
+              window.__calicoSupabaseMock.emit('SIGNED_OUT', null);
+              return { error: null };
+            },
+          },
+          async rpc(name, args) {
+            window.__calicoSupabaseMock.rpcCalls.push({ name, args });
+            if (name === 'get_calico_schedule') {
+              return { data: window.__calicoSupabaseMock.remoteSchedule ? [window.__calicoSupabaseMock.remoteSchedule] : [], error: null };
+            }
+            if (name === 'save_calico_schedule') {
+              return { data: [{ revision: (args.expected_revision || 0) + 1, updated_at: '2026-06-14T12:00:00.000Z' }], error: null };
+            }
+            return { data: [], error: null };
+          },
+        };
+      },
+    };
+  }, { initialSession: session, initialRemoteSchedule: remoteSchedule });
+}
+
 async function openAddModal(page, type = 'task') {
   const mobileAdd = page.locator('.mobile-nav-add');
   if (await mobileAdd.isVisible()) {
@@ -190,7 +240,53 @@ test('daily availability, recurring availability blocks and fixed task times per
   await expect(page.locator('.day-item.task', { hasText: 'Timed focus block' })).toContainText('fixed time');
 });
 
-test('release gate guards invalid inputs, conflict reductions and backup credentials', async ({ page }) => {
+test('email account sync sends a magic link and saves a portable account state', async ({ page }) => {
+  await mockSupabase(page);
+  await onboard(page);
+  await page.getByRole('button', { name: /settings/i }).first().click();
+
+  await expect(page.locator('#settings-cloud-endpoint')).toHaveCount(0);
+  await expect(page.locator('#account-email')).toBeVisible();
+  await page.locator('#account-email').fill('person@example.com');
+  await page.getByRole('button', { name: /email me a sign-in link/i }).click();
+  await expect.poll(() => page.evaluate(() => window.__calicoSupabaseMock.magicLinkEmails)).toEqual(['person@example.com']);
+
+  await page.evaluate(() => {
+    window.__calicoSupabaseMock.emit('SIGNED_IN', {
+      user: { id: '44444444-4444-4444-4444-444444444444', email: 'person@example.com' },
+    });
+  });
+  await expect(page.locator('#account-signed-in')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__calicoSupabaseMock.rpcCalls)).toHaveLength(2);
+
+  const calls = await page.evaluate(() => window.__calicoSupabaseMock.rpcCalls);
+  expect(calls[0].name).toBe('get_calico_schedule');
+  expect(calls[1].name).toBe('save_calico_schedule');
+  expect(calls[1].args.expected_revision).toBe(0);
+  expect(calls[1].args.next_state.account).toBeUndefined();
+  expect(calls[1].args.next_state.cloud).toBeUndefined();
+});
+
+test('invalid account data leaves the local schedule untouched', async ({ page }) => {
+  await mockSupabase(page);
+  await onboard(page);
+  await addTask(page, 'Keep this local task');
+  await page.evaluate(() => {
+    window.__calicoSupabaseMock.remoteSchedule = {
+      state: { not: 'a Calico schedule' },
+      revision: 4,
+      updated_at: '2026-06-14T12:00:00.000Z',
+    };
+    window.__calicoSupabaseMock.emit('SIGNED_IN', {
+      user: { id: '55555555-5555-5555-5555-555555555555', email: 'person@example.com' },
+    });
+  });
+  await expect.poll(() => page.evaluate(() => S.account.lastError)).toBe('Your account schedule could not be read safely.');
+  expect(await page.evaluate(() => S.onboarded)).toBe(true);
+  expect(await page.evaluate(() => S.tasks.map(task => task.name))).toEqual(['Keep this local task']);
+});
+
+test('release gate guards invalid inputs, conflict reductions and portable backups', async ({ page }) => {
   await onboard(page);
   await page.getByRole('button', { name: /settings/i }).first().click();
 
@@ -238,13 +334,15 @@ test('release gate guards invalid inputs, conflict reductions and backup credent
   await page.getByRole('button', { name: /discard task/i }).click();
 
   await page.evaluate(() => {
-    S.cloud = { endpoint: '', token: 'release-gate-secret', lastSyncAt: null, lastError: '' };
+    S.account = { revision: 5, email: 'person@example.com', lastSyncAt: null, lastError: '' };
+    S.cloud = { endpoint: 'https://example.test/state', token: 'release-gate-secret' };
     save();
   });
   const downloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: /export backup/i }).click();
   const download = await downloadPromise;
   const backup = JSON.parse(await fs.readFile(await download.path(), 'utf8'));
-  expect(backup.state.cloud.token).toBeUndefined();
-  expect(await page.evaluate(() => S.cloud.token)).toBe('release-gate-secret');
+  expect(backup.state.account).toBeUndefined();
+  expect(backup.state.cloud).toBeUndefined();
+  expect(await page.evaluate(() => S.account.revision)).toBe(5);
 });

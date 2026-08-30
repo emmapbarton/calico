@@ -21,7 +21,7 @@ function updateAllSliderFills() {
    STATE
 ══════════════════════════════════════════ */
 const DEFAULT_STATE = {
-  stateVersion: 5,
+  stateVersion: 6,
   onboarded: false,
   baseline: 7,
   distribution: 'even',
@@ -45,7 +45,7 @@ const DEFAULT_STATE = {
   nudgeDismissed: false,
   taskLog: {},        // 'taskId|dateStr' → {scheduled, completed, checked}
   lastCheckinDate: null,
-  cloud: { endpoint: '', token: '', lastSyncAt: null, lastError: '' },
+  account: { revision: 0, lastSyncAt: null, lastError: '', email: '' },
   // occurrenceId -> { pinned: {dateStr: hours}, excludedDates: [], timeBlocks: {dateStr: {start,end,mode}} }
   manualOverrides: {},
 };
@@ -62,7 +62,7 @@ const _undoStack = [];
 ══════════════════════════════════════════ */
 const STORAGE_KEY = 'calico_v2';
 const LEGACY_STORAGE_KEY = 'calico_v1';
-const STATE_VERSION = 5;
+const STATE_VERSION = 6;
 const UNASSIGNED_PROJECT_ID = '__unassigned__';
 
 function cloneData(value) {
@@ -211,11 +211,14 @@ function normalizeState(input) {
   next.intensities = next.intensities && typeof next.intensities === 'object' ? next.intensities : {};
   next.intensityHistory = Array.isArray(next.intensityHistory) ? next.intensityHistory.slice(-30) : [];
   next.taskLog = next.taskLog && typeof next.taskLog === 'object' ? next.taskLog : {};
-  next.cloud = next.cloud && typeof next.cloud === 'object' ? next.cloud : {};
-  next.cloud.endpoint = String(next.cloud.endpoint || '').trim();
-  next.cloud.token = String(next.cloud.token || '');
-  next.cloud.lastSyncAt = next.cloud.lastSyncAt || null;
-  next.cloud.lastError = String(next.cloud.lastError || '');
+  next.account = next.account && typeof next.account === 'object' ? next.account : {};
+  next.account.revision = Math.max(0, Math.trunc(finiteNumber(next.account.revision, 0, 0, Number.MAX_SAFE_INTEGER)));
+  next.account.lastSyncAt = next.account.lastSyncAt || null;
+  next.account.lastError = String(next.account.lastError || '');
+  next.account.email = String(next.account.email || '');
+  // Version 6 retires the manually configured cloud adapter. Removing this
+  // data on load also clears any legacy bearer token from browser storage.
+  delete next.cloud;
   next.taskOverworkAllowances = next.taskOverworkAllowances && typeof next.taskOverworkAllowances === 'object'
     ? next.taskOverworkAllowances : {};
   next.manualOverrides = next.manualOverrides && typeof next.manualOverrides === 'object'
@@ -271,7 +274,7 @@ function save() {
   try {
     S.stateVersion = STATE_VERSION;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
-    queueCloudSave();
+    queueAccountSync();
     return true;
   } catch (error) {
     console.error('Calico could not save state', error);
@@ -326,8 +329,8 @@ function undoLastAction() {
 
 function stateForBackup(state = S) {
   const backup = cloneData(state);
-  backup.cloud = { ...(backup.cloud || {}) };
-  delete backup.cloud.token;
+  delete backup.account;
+  delete backup.cloud;
   return backup;
 }
 
@@ -374,102 +377,218 @@ async function importDataFile(input) {
 
 
 /* ══════════════════════════════════════════
-   OPTIONAL CLOUD PERSISTENCE
+   SUPABASE ACCOUNT SYNC
 ══════════════════════════════════════════ */
-let _cloudSaveTimer = null;
-let _cloudSyncing = false;
-function cloudConfigured() {
-  return !!(S.cloud?.endpoint && /^https:\/\//i.test(S.cloud.endpoint));
+let _supabaseClient = null;
+let _accountUser = null;
+let _accountLoadedUserId = null;
+let _accountSaveTimer = null;
+let _accountSyncing = false;
+
+function accountSyncConfigured() {
+  const config = globalThis.CALICO_SUPABASE_CONFIG;
+  return !!(config?.url && config?.publishableKey && globalThis.supabase?.createClient);
 }
-function cloudHeaders() {
-  const headers = { 'Content-Type': 'application/json' };
-  if (S.cloud?.token) headers.Authorization = `Bearer ${S.cloud.token}`;
-  return headers;
+
+function accountSyncReady() {
+  return !!(_supabaseClient && _accountUser && _accountLoadedUserId === _accountUser.id);
 }
-function queueCloudSave() {
-  if (!cloudConfigured() || typeof fetch !== 'function') return;
-  clearTimeout(_cloudSaveTimer);
-  _cloudSaveTimer = setTimeout(() => syncCloudNow(true), 600);
-}
-function stateForCloudSync() {
+
+function stateForAccountSync() {
   const state = normalizeState(S);
-  state.cloud = { ...state.cloud };
-  delete state.cloud.token;
+  delete state.account;
+  delete state.cloud;
   return state;
 }
-async function syncCloudNow(silent = false) {
-  if (!cloudConfigured()) {
-    if (!silent) showToast('Add an HTTPS cloud endpoint first.');
+
+function queueAccountSync() {
+  if (!accountSyncReady()) return;
+  clearTimeout(_accountSaveTimer);
+  _accountSaveTimer = setTimeout(() => syncAccountNow(true), 600);
+}
+
+function persistAccountMetadata() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(S)); } catch (_) {}
+}
+
+function hasLocalSchedule() {
+  return !!(S.onboarded || S.tasks.length || S.events.length || S.projects.length);
+}
+
+async function initializeAccountSync() {
+  if (!accountSyncConfigured()) return false;
+  const config = globalThis.CALICO_SUPABASE_CONFIG;
+  _supabaseClient = globalThis.supabase.createClient(config.url, config.publishableKey, {
+    auth: { autoRefreshToken: true, persistSession: true, detectSessionInUrl: true },
+  });
+  _supabaseClient.auth.onAuthStateChange((event, session) => {
+    setTimeout(() => handleAccountSession(event, session), 0);
+  });
+  const { data, error } = await _supabaseClient.auth.getSession();
+  if (error) {
+    S.account.lastError = error.message || 'Could not restore your sign-in session.';
+    persistAccountMetadata();
+    renderSettingsAccountStatus();
     return false;
   }
-  if (_cloudSyncing || typeof fetch !== 'function') return false;
-  _cloudSyncing = true;
+  await handleAccountSession('INITIAL_SESSION', data.session);
+  return true;
+}
+
+async function handleAccountSession(event, session) {
+  _accountUser = session?.user || null;
+  S.account.email = _accountUser?.email || '';
+  if (!_accountUser) {
+    _accountLoadedUserId = null;
+    S.account.revision = 0;
+    persistAccountMetadata();
+    renderSettingsAccountStatus();
+    return;
+  }
+  if (_accountLoadedUserId !== _accountUser.id) {
+    await restoreAccountSchedule();
+  }
+  renderSettingsAccountStatus();
+}
+
+async function sendMagicLink() {
+  const email = document.getElementById('account-email')?.value.trim().toLowerCase();
+  if (!email) {
+    document.getElementById('account-email')?.focus();
+    return;
+  }
+  if (!_supabaseClient) {
+    showToast('Account sign-in is unavailable. Check your connection and try again.');
+    return;
+  }
+  const { error } = await _supabaseClient.auth.signInWithOtp({
+    email,
+    options: { emailRedirectTo: globalThis.location?.origin || undefined },
+  });
+  if (error) {
+    showToast(error.message || 'Could not send the sign-in link.');
+    return;
+  }
+  showToast('Check your email for your Calico sign-in link.');
+}
+
+async function restoreAccountSchedule() {
+  if (!_supabaseClient || !_accountUser) return false;
+  _accountSyncing = true;
   try {
-    const payload = { state: stateForCloudSync(), updatedAt: new Date().toISOString() };
-    const response = await fetch(S.cloud.endpoint, { method: 'PUT', headers: cloudHeaders(), body: JSON.stringify(payload) });
-    if (!response.ok) throw new Error(`Cloud save failed (${response.status})`);
-    S.cloud.lastSyncAt = new Date().toISOString();
-    S.cloud.lastError = '';
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
-    if (!silent) showToast('Cloud sync complete');
-    renderSettingsCloudStatus();
+    const { data, error } = await _supabaseClient.rpc('get_calico_schedule');
+    if (error) throw error;
+    const remote = data?.[0];
+    if (!remote) {
+      _accountLoadedUserId = _accountUser.id;
+      S.account.revision = 0;
+      S.account.lastError = '';
+      if (hasLocalSchedule()) queueAccountSync();
+      return true;
+    }
+    if (!isCalicoStateDocument(remote.state)) {
+      throw new Error('Your account schedule could not be read safely.');
+    }
+
+    const remoteState = normalizeState(remote.state);
+    const keepRemote = !hasLocalSchedule() || confirm(
+      'A Calico schedule already exists for this account. Choose OK to use the account copy, or Cancel to keep this device copy and replace the account copy.'
+    );
+    if (keepRemote) {
+      S = remoteState;
+    }
+    S.account = {
+      revision: Number(remote.revision) || 0,
+      lastSyncAt: remote.updated_at || new Date().toISOString(),
+      lastError: '',
+      email: _accountUser.email || '',
+    };
+    _accountLoadedUserId = _accountUser.id;
+    invalidatePlan();
+    persistAccountMetadata();
+    syncAppShell();
+    render();
+    if (!keepRemote) queueAccountSync();
     return true;
   } catch (error) {
-    S.cloud.lastError = error.message || 'Cloud save failed';
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
-    if (!silent) showToast(S.cloud.lastError);
-    renderSettingsCloudStatus();
+    S.account.lastError = error.message || 'Could not load your account schedule.';
+    persistAccountMetadata();
+    showToast(S.account.lastError + ' Your local schedule is still available.');
     return false;
   } finally {
-    _cloudSyncing = false;
+    _accountSyncing = false;
+    renderSettingsAccountStatus();
   }
 }
-async function loadCloudState() {
-  if (!cloudConfigured() || typeof fetch !== 'function') return false;
+
+async function syncAccountNow(silent = false) {
+  if (!accountSyncReady() || _accountSyncing) return false;
+  _accountSyncing = true;
   try {
-    const response = await fetch(S.cloud.endpoint, { method: 'GET', headers: cloudHeaders() });
-    if (response.status === 404) return syncCloudNow(true);
-    if (!response.ok) throw new Error(`Cloud load failed (${response.status})`);
-    const parsed = await response.json();
-    const candidate = parsed.state || parsed;
-    if (!isCalicoStateDocument(candidate)) {
-      throw new Error('This is not a Calico backup.');
+    const { data, error } = await _supabaseClient.rpc('save_calico_schedule', {
+      expected_revision: S.account.revision || 0,
+      next_state: stateForAccountSync(),
+    });
+    if (error) throw error;
+    const saved = data?.[0];
+    if (!saved) {
+      S.account.lastError = 'Another device changed this schedule. Sync is paused so nothing is overwritten.';
+      persistAccountMetadata();
+      if (!silent) showToast(S.account.lastError);
+      return false;
     }
-    const remote = normalizeState(candidate);
-    const localCloud = { ...S.cloud };
-    const replace = confirm('Cloud data is available. Replace this device with the cloud copy? Choose Cancel to keep local data and upload it.');
-    if (replace) S = remote;
-    S.cloud = { ...S.cloud, endpoint: localCloud.endpoint, token: localCloud.token, lastSyncAt: new Date().toISOString(), lastError: '' };
-    invalidatePlan();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
-    render();
-    if (!replace) await syncCloudNow(true);
+    S.account.revision = Number(saved.revision) || S.account.revision;
+    S.account.lastSyncAt = saved.updated_at || new Date().toISOString();
+    S.account.lastError = '';
+    persistAccountMetadata();
+    if (!silent) showToast('Account sync complete');
     return true;
   } catch (error) {
-    S.cloud.lastError = error.message || 'Cloud load failed';
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
-    showToast(S.cloud.lastError + ' — local recovery copy kept.');
+    S.account.lastError = error.message || 'Account sync failed.';
+    persistAccountMetadata();
+    if (!silent) showToast(S.account.lastError);
     return false;
+  } finally {
+    _accountSyncing = false;
+    renderSettingsAccountStatus();
   }
 }
-function saveCloudSettings() {
-  S.cloud ||= {};
-  S.cloud.endpoint = document.getElementById('settings-cloud-endpoint')?.value.trim() || '';
-  S.cloud.token = document.getElementById('settings-cloud-token')?.value || '';
-  S.cloud.lastError = '';
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(S));
-  renderSettingsCloudStatus();
-  loadCloudState();
+
+async function signOutAccount() {
+  if (!_supabaseClient) return;
+  if (!confirm('Sign out of Calico on this device? Your account copy stays safe in the cloud.')) return;
+  const { error } = await _supabaseClient.auth.signOut();
+  if (error) {
+    showToast(error.message || 'Could not sign out.');
+    return;
+  }
+  _accountUser = null;
+  _accountLoadedUserId = null;
+  S.account = { revision: 0, lastSyncAt: null, lastError: '', email: '' };
+  persistAccountMetadata();
+  renderSettingsAccountStatus();
+  showToast('Signed out. Your local schedule remains on this device.');
 }
-function renderSettingsCloudStatus() {
-  const endpoint = document.getElementById('settings-cloud-endpoint');
-  const token = document.getElementById('settings-cloud-token');
-  const status = document.getElementById('settings-cloud-status');
-  if (endpoint) endpoint.value = S.cloud?.endpoint || '';
-  if (token) token.value = S.cloud?.token || '';
-  if (status) status.textContent = S.cloud?.lastError
-    ? `Cloud warning: ${S.cloud.lastError}`
-    : S.cloud?.lastSyncAt ? `Last cloud sync: ${new Date(S.cloud.lastSyncAt).toLocaleString()}` : 'Local-only until a cloud endpoint is configured.';
+
+function renderSettingsAccountStatus() {
+  const signedOut = document.getElementById('account-signed-out');
+  const signedIn = document.getElementById('account-signed-in');
+  const email = document.getElementById('account-email-display');
+  const status = document.getElementById('account-sync-status');
+  if (!signedOut || !signedIn || !status) return;
+  const configured = accountSyncConfigured();
+  signedOut.classList.toggle('hidden', !!_accountUser || !configured);
+  signedIn.classList.toggle('hidden', !_accountUser || !configured);
+  if (email) email.textContent = _accountUser?.email || '';
+  status.textContent = !configured
+    ? 'Account sign-in is unavailable in this build.'
+    : S.account.lastError
+      ? `Sync needs attention: ${S.account.lastError}`
+      : _accountUser
+        ? (S.account.lastSyncAt
+          ? `Synced ${new Date(S.account.lastSyncAt).toLocaleString()}`
+          : 'Preparing your account schedule…')
+        : 'Sign in to sync this schedule securely across your devices.';
 }
 
 /* ══════════════════════════════════════════
@@ -3104,7 +3223,7 @@ function renderSettings() {
   const minBlock = document.getElementById('settings-min-block');
   if (minBlock) minBlock.value = S.minBlockHours || 0.5;
   renderProjectSettings();
-  renderSettingsCloudStatus();
+  renderSettingsAccountStatus();
 }
 
 function renderProjectSettings() {
@@ -4785,20 +4904,23 @@ function remindCheckinLater() {
 ══════════════════════════════════════════ */
 load();
 
+function syncAppShell() {
+  document.getElementById('onboarding').classList.toggle('hidden', S.onboarded);
+  document.getElementById('app').classList.toggle('hidden', !S.onboarded);
+}
+
+syncAppShell();
 if (S.onboarded) {
-  document.getElementById('onboarding').classList.add('hidden');
-  document.getElementById('app').classList.remove('hidden');
   render();
   // Show check-in prompt once per day if there are unchecked past tasks
   const todayStr = ds(today());
   if (S.lastCheckinDate !== todayStr) {
     maybeShowCheckin();
   }
-  loadCloudState();
+  initializeAccountSync();
 } else {
-  document.getElementById('onboarding').classList.remove('hidden');
-  document.getElementById('app').classList.add('hidden');
   render();
+  initializeAccountSync();
 }
 
 syncUndoButton();

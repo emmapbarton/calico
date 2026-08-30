@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-08-29T21:26:03.384Z",
-  "total": 65,
-  "passed": 65,
+  "generatedAt": "2026-08-30T10:20:10.665Z",
+  "total": 66,
+  "passed": 66,
   "failed": 0,
   "results": [
     {
@@ -241,7 +241,7 @@
       "status": "PASS"
     },
     {
-      "name": "cloud sync payload omits bearer tokens",
+      "name": "account sync payload omits local account metadata and retired cloud credentials",
       "status": "PASS"
     },
     {
@@ -257,11 +257,15 @@
       "status": "PASS"
     },
     {
-      "name": "release gate: exported backups omit cloud access tokens without mutating local state",
+      "name": "release gate: backups omit account metadata and retired cloud credentials",
       "status": "PASS"
     },
     {
-      "name": "cloud load validation rejects non-Calico documents",
+      "name": "v6 normalization clears retired cloud credentials from legacy state",
+      "status": "PASS"
+    },
+    {
+      "name": "account load validation rejects non-Calico documents",
       "status": "PASS"
     }
   ]

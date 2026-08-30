@@ -1103,11 +1103,14 @@ test('v0.1 ux: day view items and search cover tasks events and projects', () =>
   assert.equal(searchMatches('day event')[0].type, 'event');
 });
 
-test('cloud sync payload omits bearer tokens', () => {
-  resetState({ cloud: { endpoint: 'https://example.test/state', token: 'secret-token' } });
-  const state = stateForCloudSync();
-  assert.equal(state.cloud.endpoint, 'https://example.test/state');
-  assert.equal(Object.hasOwn(state.cloud, 'token'), false);
+test('account sync payload omits local account metadata and retired cloud credentials', () => {
+  resetState({
+    account: { revision: 12, lastSyncAt: '2026-06-14T12:00:00.000Z', lastError: 'old error', email: 'person@example.com' },
+    cloud: { endpoint: 'https://example.test/state', token: 'secret-token' },
+  });
+  const state = stateForAccountSync();
+  assert.equal(Object.hasOwn(state, 'account'), false);
+  assert.equal(Object.hasOwn(state, 'cloud'), false);
 });
 
 test('release gate: working-hour inputs normalize immediately and reject reversed windows', () => {
@@ -1140,15 +1143,26 @@ test('release gate: reduction finds the largest schedulable non-splittable estim
   assert.equal(taskEstimateFits(task, 4.5), false);
 });
 
-test('release gate: exported backups omit cloud access tokens without mutating local state', () => {
-  resetState({ cloud: { endpoint: 'https://example.test/state', token: 'secret-token' } });
+test('release gate: backups omit account metadata and retired cloud credentials', () => {
+  resetState({
+    account: { revision: 4, email: 'person@example.com' },
+    cloud: { endpoint: 'https://example.test/state', token: 'secret-token' },
+  });
   const backup = stateForBackup();
-  assert.equal(backup.cloud.endpoint, 'https://example.test/state');
-  assert.equal(Object.hasOwn(backup.cloud, 'token'), false);
-  assert.equal(S.cloud.token, 'secret-token');
+  assert.equal(Object.hasOwn(backup, 'account'), false);
+  assert.equal(Object.hasOwn(backup, 'cloud'), false);
+  assert.equal(S.account.revision, 4);
 });
 
-test('cloud load validation rejects non-Calico documents', () => {
+test('v6 normalization clears retired cloud credentials from legacy state', () => {
+  const state = normalizeState({
+    tasks: [], events: [],
+    cloud: { endpoint: 'https://example.test/state', token: 'secret-token' },
+  });
+  assert.equal(Object.hasOwn(state, 'cloud'), false);
+});
+
+test('account load validation rejects non-Calico documents', () => {
   assert.equal(isCalicoStateDocument({}), false);
   assert.equal(isCalicoStateDocument({ tasks: [], events: [] }), true);
   assert.equal(isCalicoStateDocument({ state: { tasks: [], events: [] } }), false);
